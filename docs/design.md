@@ -217,7 +217,7 @@ sequenceDiagram
 
 ### 17.2 事件模型
 
-事件 = `{seq（房主序）, actor（成员设备）, kind, payload, at, sig（提交设备签名）}`：
+事件 = `{seq（房主序）, actor（成员设备）, kind, payload, at, sig（提交设备签名）}`；**签名覆盖 {actor, kind, payload, at}（不含 seq）——成员以无序形提交，房主验签后分配 seq，完整定序事件才入库与广播**：
 
 | kind | payload 要点 |
 |---|---|
