@@ -47,7 +47,7 @@ flowchart LR
 
 ## 4. 身份与地址
 
-- **设备密钥**：Ed25519（node:crypto），落数据目录 `keys/`，权限 0600。指纹 = sha256(pubkey) 前 16 hex，`/alive`、配对、`amail identity` 均展示。
+- **设备密钥**：单一 32B 种子落数据目录 `keys/`（0600），派生**两对密钥——Ed25519（签名）与 X25519（加密）**；配对时两公钥一并交换。指纹 = sha256(签名公钥) 前 16 hex，`/alive`、配对、`amail identity` 均展示。
 - **用户声明**：`{name, email}` + 设备密钥签名；`setup` 时读 git config（全局优先，仓级兜底）供确认修改。声明随信封携带。
 - **地址**：`人名@设备名`。设备名取主机名（mDNS instance 冲突时自动加序号，地址随实际名）。多设备即多地址；换机 = 新设备重新 setup + 配对 + unpair 旧设备。
 
@@ -125,7 +125,7 @@ sequenceDiagram
 
 ## 8. 投递协议
 
-- `POST http://<peer>:<port>/v1/deliver`，载荷 = §5 信封。对端处理序：源 IP 无要求 → 验签（发件设备须在 peers 白名单且未吊销）→ 时间窗（`createdAt` ±10min）→ id 去重 → 解封 → 附件校验落盘 → 同事务写 messages/attachments → 200 `{deliveredAt}`。
+- `POST http://<peer>:<port>/v1/deliver`，载荷 = §5 投递载荷（信封+密封附件 parts）。对端处理序：源 IP 无要求 → 验签（发件设备须在 peers 白名单且未吊销）→ 时间窗（**仅拒未来信：createdAt > now+10min 即拒；不设下限**）→ id 去重 → 解封 → 附件校验落盘 → 同事务写 messages/attachments → 200 `{deliveredAt}`。
 - 失败/离线 → **出箱**：指数退避（30s 起 ×2，上限 1h），默认 72h 过期；过期退回发件人（本地标记 + 桌面通知）。
 - `POST /v1/receipt` `{messageId, kind, at, sig}`：read 回执通道。
 - 所有对端请求带发件设备签名；信封格式与传输无关（未来跨网可换 iroh 承载，信封语义不动）。
@@ -177,7 +177,7 @@ sequenceDiagram
 | LAN 嗅探 | 正文/附件/handoff 密封；信封头明文（记录的取舍） |
 | 冒名投递 | 仅接受已配对、未吊销 peers 的验签信 |
 | 配对 MITM / 冒名 | 6 位 SAS 人眼比对 |
-| 重放 | 信 id 去重 + createdAt ±10min 时间窗 |
+| 重放 | 信 id 去重（同 id 幂等）+ 签名覆盖 id（伪造新 id 需私钥）+ 仅拒未来信的 ±10min 上界窗（与 72h 出箱重试不冲突） |
 | 端点被攻陷 | 不防（密钥即身份）；止损 = 对端 unpair |
 | mDNS 泛洪 / DoS | 不防，v1 明示 |
 
@@ -237,7 +237,7 @@ sequenceDiagram
 
 - **显式 attach**：经 skill 或 CLI 把本机某活跃 agent 会话挂入 workspace；不自动圈定、不自动上报（隐私边界 = 显式意图）。
 - **只读**：messagelist + codediffs 实时流（SSE），不落库；晚加入者可拉一次当前快照。驾驶延后。
-- 采集适配器：v1 = Claude Code（hooks + session JSONL）、Pi（本地 trace）、OpenCode（service API）；Codex 后补。无适配器的 CLI 无法 attach。
+- 采集适配器：v1 = Claude Code（session JSONL 增量尾随，不装 hooks）、Pi（本地 session jsonl 尾随）、OpenCode（**本地 opencode.db 只读**；service API 列备选——已裁定偏差，理由：无服务依赖、可 fixture 测试）；Codex 后补。无适配器的 CLI 无法 attach。
 
 ### 17.5 artifacts
 
