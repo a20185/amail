@@ -93,9 +93,9 @@ messages(id PK, direction, from_addr, to_addr, subject, in_reply_to,
          project, body, handoff_json, sig_valid)
 attachments(id PK, message_id, name, sha256, size, blob_path)
 receipts(message_id, kind, at)
-peers(device_id PK, device_name, user_name, user_email, pubkey_pem,
-      paired_at, revoked_at)
-outbox(id PK, envelope_json, attempts, next_retry_at, last_error,
+peers(device_id PK, device_name, user_name, user_email,
+      sign_pub_pem, enc_pub_pem, paired_at, revoked_at)
+outbox(id PK, payload_json(DeliverReq 完整序列化), attempts, next_retry_at, last_error,
        created_at, expires_at)
 meta(key PK, value)   -- device_id、schema 版本
 ```
@@ -218,7 +218,7 @@ sequenceDiagram
 
 ### 17.2 事件模型
 
-事件 = `{seq（房主序）, actor（成员设备）, kind, payload, at, sig（提交设备签名）}`；**签名覆盖 {actor, kind, payload, at}（不含 seq）——成员以无序形提交，房主验签后分配 seq，完整定序事件才入库与广播**：
+事件 = `{seq（房主序）, eventId, actor（成员设备）, kind, payload, at, sig（提交设备签名）}`；**签名覆盖 {eventId, actor, kind, payload, at}（不含 seq；eventId 供房主幂等去重）——成员以无序形提交，房主验签后分配 seq，完整定序事件才入库与广播**：
 
 | kind | payload 要点 |
 |---|---|

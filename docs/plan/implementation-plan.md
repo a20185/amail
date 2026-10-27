@@ -115,7 +115,7 @@
 **Contract**
 
 - `router.ts`：实现全局约束 3 的路由发现——发现基准 = router 模块兄弟 `routes/` 目录，`loadRoutes(dir?)` 可注入（测试注入 `src/daemon/routes`，不依赖构建产物）；路由模块默认导出 `Route[]`、可选导出 `init?(ctx)`（启动时统一调用、收集 disposer）；`ctx={req, res, db, dirs, identity, bus, params, query, body}`；非 lan 路由按**规范化 loopback** 判定（127.0.0.0/8、::1、v4-mapped 均放行，其余 403）。
-- `server.ts`：`startDaemon({port=36969, dirs})`：单例 pid 锁（`data/daemon.pid`，占用即退出码 3）；监听 127.0.0.1 与 ::1；SSE `GET /v1/events`（`text/event-stream`，事件 `{type, data}`：new-mail/receipt/outbox/pairing）；**优雅停机：执行全部 init disposer、关 bus、关 server**。端口可注入（测试用 0）。
+- `server.ts`：`startDaemon({port=36969, dirs})`：单例 pid 锁（`data/daemon.pid`，占用即退出码 3）；**监听 0.0.0.0 与 ::（LAN 面可达，mDNS 广播实际端口）——lan:false 路由靠规范化 loopback 源地址判定（127.0.0.0/8、::1、v4-mapped 放行，其余 403）实现回环隔离，不靠监听地址**；SSE `GET /v1/events`（`text/event-stream`，事件 `{type, data}`：new-mail/receipt/outbox/pairing）；**优雅停机：执行全部 init disposer、关 bus、关 server**。端口可注入（测试用 0）。
 - `sse.ts`：`EventBus`（on/emit/close-all）。
 - `mdns.ts`：`advertise(dirs, port)`（ciao，`_amail._tcp`，TXT `{fp,user,ver}`）；`browsePeers(timeoutMs)` → `[{name, host, port, txt}]`；测试注入 fake 实现（不真发组播）。
 - `notify.ts`：`notify(title, body)`：darwin `osascript -e 'display notification …'`；linux `notify-send`；其他平台 no-op；`AMAIL_NOTIFY_CMD` 覆盖（测试用）。
@@ -176,10 +176,10 @@
 - `routes/pair.ts`（lan=true）：状态机 `offer→answer→SAS 比对→双确认→落盘`，60s 过期：A `POST /v1/pair/offer`（PairOffer，含双公钥）；B `POST /v1/pair/answer/:offerNonce`（PairAnswer，**不含确认签名**）；两端各自 sas6 派生并经 SSE `pairing` 事件+CLI 展示 6 位码；**比对一致后双方各自** `POST /v1/pair/confirm/:offerNonce`（PairConfirmSig，仅自己的签名）；双方各收齐两个 confirmSig 后校验并 `peers` 落盘（含双公钥）。B 端发起对称同构。
 - `core/peer.ts`：peers CRUD：`isPaired(db, addr)`、`savePeer`、`revokePeer`（unpair 后拒收）。
 - `core/delivery.ts`：`attemptDelivery(deliverReq, peerAddr)`：解析 mDNS 缓存/peers 里最近地址（TXT 指纹校验=peers 记录指纹）→ `POST http://peer/v1/deliver` 5s 超时；成功 `markDelivered`。**生命周期经 `routes/deliver.ts` 的 `init(ctx)` 挂载（返回 disposer，daemon 停机清理）**：daemon 启动 `setInterval(30s)` 扫 `due` 重试（P1 退避），`expireDue` 通知发件人（notify+bus），订阅 bus `outbox`（send-local 入箱即发事件）→ 立即 attemptDelivery 一次（在线秒达），失败回退出箱由 30s 扫描重试；另订阅 bus `receipt`（read 事件）→ 对已配对发件人投递 read 回执（失败仅记日志不重试风暴）。
-- `routes/deliver.ts`（lan=true）：验签（设备在 peers 且未吊销；`verifyCanonical`）→ **时间窗：仅拒"未来信"（createdAt > now+10min 即拒）；不设下限——历史信重放由 `id` 去重（同 id 幂等 200）与签名覆盖 id（伪造新 id 需私钥）共同防护，从而与 72h 出箱重试不冲突** → `id` 去重（已存在直接 200 幂等）→ `openBody` → **逐 part `openBody` 解密附件字节→sha256 与 envelope.attachments 比对→落 blob**（`attachments/<前2位>/<hash>`，去重复用）→ `saveInbound` → `notify` + bus `new-mail` → 200 `DeliverRes`。任一失败 4xx + safe error code。
+- `routes/deliver.ts`（lan=true）：验签（设备在 peers 且未吊销；`verifyCanonical`）→ **时间窗：仅拒"未来信"（createdAt > now+10min 即拒）；不设下限——历史信重放由 `id` 去重（同 id 幂等 200）与签名覆盖 id（伪造新 id 需私钥）共同防护，从而与 72h 出箱重试不冲突** → `id` 去重（已存在直接 200 幂等）→ `openBody` → **逐 part `openBody` 解密附件字节→sha256 与声明 size 双校验（不匹配拒收 422）→落 blob**（`attachments/<前2位>/<hash>`，去重复用）→ `saveInbound` → `notify` + bus `new-mail` → 200 `DeliverRes`。**载荷上限：单附件 ≤10MB、单次请求总载荷 ≤64MB，超限 413**。任一失败 4xx + safe error code。
 - `routes/receipt.ts`（lan=true）：验签 → `receipts` 落库 + bus。
 - `cmds/peers.ts`：`amail peers [--scan]`（mdns browse 列出可配对设备：name/host/fp/user）；`cmds/pair.ts`：`amail pair <user@device>`（发起或应答按对端状态自动）、`--confirm`、`amail unpair <addr>`；`cmds/send.ts`：`send <to> --subject --body [--ref path]…`（refs→附件元数据+parts 密封，daemon 组装 DeliverReq）；`cmds/reply.ts`：`reply <msgId> --body [--ref]…`（inReplyTo/thread 链接续）；`cmds/status.ts`：调 daemon `GET /v1/status`（daemon/未读/出箱/peers 概况）。
-- 测试（进程内双 daemon e2e，两套 AMAIL_HOME 沙箱+两随机端口+fake mdns）：配对双方 SAS 相等；**confirmSig 篡改 401**；A→B 直投（含 1 个附件 part）B 落库+附件哈希校验通过+notify 事件+delivered；篡改 sig 401；重放（同 id 二投）幂等 200；**未来信（createdAt > now+10min）4xx、历史时间戳（< now-1h）过窗**；B 离线→A 出箱→恢复后重试成功；**send 后在线对端 1s 内收到（即时直投）**；read→A 收到 read 回执；吊销后拒收。
+- 测试（进程内双 daemon e2e，两套 AMAIL_HOME 沙箱+两随机端口+fake mdns）：配对双方 SAS 相等；**confirmSig 篡改 401**；A→B 直投（含 1 个附件 part）B 落库+附件哈希与 size 校验通过+notify 事件+delivered；篡改 sig 401；重放（同 id 二投）幂等 200；**未来信（createdAt > now+10min）4xx 拒收；历史信（createdAt < now-1h）被接受（不设下限）**；**附件 size 与实际不符 422；超 10MB 附件 413**；B 离线→A 出箱→恢复后重试成功；**send 后在线对端 1s 内收到（即时直投）**；read→A 收到 read 回执；吊销后拒收。
 
 **Accept**：全局约束 4 全绿；上述 e2e 场景逐条为独立测试。
 
@@ -226,11 +226,11 @@
 **Contract**
 
 - `events.ts`：`applyEvent(state, event)` 纯函数折叠 → `WorkspaceState{actions[], todos[], artifacts[], members[], attached[]}`（todo 按 id upsert 状态机；action 追加；membership 增删；artifact upsert）。
-- `host.ts`：`WorkspaceHost(db, workspaceId)`：`submit(signedEvent)`：**先按 `eventId` 幂等（已存在返回原 seq，不重复追加/不重复 CC 通知）** → 验 actor 为成员且签名有效（**sig 覆盖 {eventId,actor,kind,payload,at}，不含 seq**）→ **分配 `seq=lastSeq+1`** → 事务写完整事件 + event_ids 索引 → bus 广播 `ws-event`；`eventsSince(seq)`；`state()`（折叠）。
+- `host.ts`：`WorkspaceHost(db, workspaceId)`：`submit(signedEvent)`：**先按 `eventId` 幂等（已存在返回原 seq，不重复追加/不重复 CC 通知）** → 验 actor 为成员且签名有效（**sig 覆盖 {eventId,actor,kind,payload,at}，不含 seq**）→ **分配 `seq=lastSeq+1`** → **单事务：写完整事件 + event_ids 索引 + action 的 cc[] 逐人出箱 enqueue（通知意图与事件原子持久化，崩溃不丢）** → bus 广播 `ws-event`；`eventsSince(seq)`；`state()`（折叠）。
 - `routes/workspace.ts`（lan=true）：`POST /ws/:id/events`（提交）、`GET /ws/:id/events?since=N` **双形态：`Accept: text/event-stream` → SSE（实现序：先建立订阅并缓冲实时事件，再回放 >since 的存量，按游标去重后放行——回放/订阅间隙不丢事件）；否则 JSON 补拉**、`GET /ws/:id/state`、`POST /ws/:id/invite`（房主签发邀请块）。action 事件 `cc[]` → 房主为每个 cc 成员 enqueue 信件通知（复用 P4 delivery，正文=一行摘要+workspace 引用）。
 - `invite.ts`：`buildInvite(ws)`（`{workspaceId, name, hostAddr, hostDeviceId, sig}`）；`acceptInvite(dirs, invite)`：本地登记 workspace（`workspaces` 表，hostAddr 指向房主）+ 生成 membership add 事件提交房主。邀请块随信件正文送达（skill/CLI 引导粘贴或文件）。
 - `projection-local.ts`：成员端 `syncFromHost()`（GET events?since=本地最大 remote seq → 存 `workspace_events(source='remote')`）+ `localState()`（离线只读）。
-- `cmds/ws.ts`：`ws create --project <slug> [--name]`（本地建 workspace，host=本机）；`ws invite <to>`（生成邀请块并发信）；`ws accept <--file invite.json | --mail <msgId>`；`ws state [--kind actions|todos|artifacts|members]`；`ws action --who <addr> --content <t> [--note] [--cc <addr>]…`；`ws todo add <title> [--priority --due from,to]`（**title 为位置参数**）、`ws todo set <id> [--status --priority --due]`；**`ws export [--out dir]`（投影导出 markdown：actions/todos/artifacts 三文件，Backlog.md 可读形）**。
+- `cmds/ws.ts`：`ws create --project <slug> [--name]`（**建区单事务：写 workspaces 行 + 房主 membership add 事件（seq=1）——房主天然是首个成员，后续 submit 不会被成员检查拒绝**）；`ws invite <to>`（生成邀请块并发信）；`ws accept <--file invite.json | --mail <msgId>`；`ws state [--kind actions|todos|artifacts|members]`；`ws action --who <addr> --content <t> [--note] [--cc <addr>]…`；`ws todo add <title> [--priority --due from,to]`（**title 为位置参数**）、`ws todo set <id> [--status --priority --due]`；**`ws export [--out dir]`（投影导出 markdown：actions/todos/artifacts 三文件，Backlog.md 可读形）**。
 - 测试（复用 P4 双 daemon 桩）：房主定序连续无洞；非成员提交 403；成员两端 submit→state 收敛；离线成员 localState 只读可用；invite 经信件送达→accept→membership 事件落房主；cc→信箱出现通知信。
 
 **Accept**：全局约束 4 全绿；两节点 workspace e2e 场景逐条独立测试。
@@ -258,9 +258,9 @@
 - `pi.ts`：同构 jsonl（`<时间戳>_<uuid>.jsonl`），增量尾随与兜底同 claude-code；消息/工具调用映射以 fixture 实测字段为准，映射写在文件头注释。
 - `opencode.ts`：只读打开 `opencode.db`（WAL 只读模式）——**已裁定偏差五（见全局约束 7）：直读本地 db 而非 service API，理由=无服务依赖、可 fixture 测试**；**fixture-first**：实现前先把本机真实 db 拷贝脱敏为 `tests/fixtures/mirror/opencode.db`（只留 schema+少量行），按实际表映射 session/message→MirrorEvent，映射表写文件头注释；接受标准=fixture 测试绿。
 - `hub.ts`：适配器注册表；`attachableList()`（各 adapter.discover 合并）；**attach（无论发起者是房主还是成员）先经 host.submit 提交 `session.attach` 审计事件（落 workspace_events、投影 attached[]）；随后开本地流→若是成员，逐事件 `POST /ws/:id/mirror/:sessionId/event` 上行房主；房主 hub 收到 RawMirrorEvent 后分配工作区级统一单调 `n`（跨会话共享单序），生成 MirrorEvent 写入内存环形缓冲（最近 200 条，不落库）并扇出到镜像 SSE**；`detach(sessionId)` 提交 `session.detach` 审计事件+断流清缓冲；连接断开自动 detach。
-- `routes/mirror.ts`：`GET /ws/:id/mirror?after=n`（SSE：**先建立订阅并缓冲，再回放环形缓冲中 >n 的事件，按 n 去重后放行——衔接不丢事件**；n 为工作区级游标）、`GET /ws/:id/mirror/attachable`、`POST /ws/:id/mirror/attach`、`DELETE /ws/:id/mirror/:sessionId`、`GET /ws/:id/mirror/recent`（返回工作区级 `{events[], lastN}` 供晚加入者取游标起点）、`POST /ws/:id/mirror/:sessionId/event`（成员上行通道）。
+- `routes/mirror.ts`：`GET /ws/:id/mirror?after=n`（SSE：**先建立订阅并缓冲，再回放环形缓冲中 >n 的事件，按 n 去重后放行——衔接不丢事件**；n 为工作区级游标。**after 早于缓冲最旧序时返回 409 `{error:"cursor-stale", oldestN}`，客户端重取 recent 重置游标**）、`GET /ws/:id/mirror/attachable`、`POST /ws/:id/mirror/attach`、`DELETE /ws/:id/mirror/:sessionId`、`GET /ws/:id/mirror/recent`（返回工作区级 `{events[], lastN}` 供晚加入者取游标起点）、`POST /ws/:id/mirror/:sessionId/event`（成员上行通道）。
 - `cmds/attach.ts`：`amail attach [--cli cc|pi|opencode] [--cwd path]`（列选择交互/`--session <id>` 直选）、`amail detach <sessionId>`、`amail attach --list`。
-- 测试：fixture jsonl（从真实根拷贝脱敏）→ claude-code/pi 适配器产出 msg+diff 事件序（**Edit/Write/NotebookEdit 三类工具映射各有断言**）；opencode fixture db 同；双 daemon：**成员侧** attach→审计事件恰一条落 workspace_events→上行→B 端 SSE 按 n 游标完整收到（含 recent→SSE 衔接不丢事件）→detach 后静默；MirrorEvent 数据不落 workspace_events（表内仅 attach/detach 审计事件断言）。
+- 测试：fixture jsonl（从真实根拷贝脱敏）→ claude-code/pi 适配器产出 **RawMirrorEvent**（msg+diff 事件序，**Edit/Write/NotebookEdit 三类工具映射各有断言**）；**hub 单测：RawMirrorEvent→分配工作区级 n→MirrorEvent 转换**；opencode fixture db 同；双 daemon：**成员侧** attach→审计事件恰一条落 workspace_events→上行→B 端 SSE 按 n 游标完整收到（含 recent→SSE 衔接不丢事件 + cursor-stale 409 场景）→detach 后静默；MirrorEvent 数据不落 workspace_events（表内仅 attach/detach 审计事件断言）。
 
 **Accept**：全局约束 4 全绿；三适配器 fixture 测试 + 双节点镜像 e2e。
 
@@ -282,7 +282,7 @@
 
 **Contract**
 
-- `artifacts.ts`（房主侧）：`receiveUpload(stream, meta)`：sha256 校验→落 `attachments/<前2位>/<hash>`（复用 P1 分桶）→ 生成 artifact 事件（含 ArtifactMeta）→广播；`fetchBlob(artifactId)`。
+- `artifacts.ts`（房主侧）：`receiveUpload(stream, meta)`：**实际字节数与 meta.size、sha256 双校验（不匹配 422；单文件 ≤10MB，超限 413）**→落 `attachments/<前2位>/<hash>`（复用 P1 分桶）→ 生成 artifact 事件（含 ArtifactMeta）→广播；`fetchBlob(artifactId)`。
 - `routes/ws-artifacts.ts`（lan=true）：`POST /ws/:id/artifacts`（raw body + `X-Amail-Meta` JSON 头）、`GET /ws/:id/artifacts`（列表=投影）、`GET /ws/:id/artifacts/:artifactId`（blob 流）。
 - `cmds/artifact.ts`：`amail artifact submit <file> [--note] [--tag]…`、`artifact list`、`artifact fetch <id> [-o out]`（校验哈希）。
 - `skills/amail-ws/SKILL.md`：frontmatter `{name:amail-ws, description:工作区操作, version:0.1.0}`；正文：ws state/todo/action 语义（CC=通知人）、attach 用法与时机、artifact 提交建议（何时打包产物进工作区）、护栏（只读镜像不可驾驶、事件即审计）。
