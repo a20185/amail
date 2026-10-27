@@ -135,7 +135,7 @@ sequenceDiagram
 
 - **单口双面**，默认 `:36969`（可配；mDNS 广播实际端口，发现不依赖固定口）。
 - LAN 面：`GET /alive`（`{user, deviceName, fingerprint, version}`，配对前公开可读）；`POST /v1/deliver`、`POST /v1/receipt`、`POST /v1/pair/*`。
-- 回环面（源地址非 127.0.0.1 一律 403）：`GET /v1/inbox?project=&unread=`、`GET /v1/message/:id`、`POST /v1/send`、`POST /v1/archive`、`GET /v1/events`（SSE：new-mail / receipt / outbox 变更）、`GET /v1/status`。
+- 回环面（源地址非规范化 loopback——127.0.0.0/8、::1、v4-mapped 之外——一律 403；daemon 监听 0.0.0.0 与 :: 供 LAN 面，隔离靠源地址判定）：`GET /v1/inbox?project=&unread=`、`GET /v1/message/:id`、`POST /v1/send`、`POST /v1/archive`、`GET /v1/events`（SSE：new-mail / receipt / outbox 变更）、`GET /v1/status`。
 - 新信 → 桌面通知（macOS `osascript` / Linux `notify-send`，零依赖）+ SSE 推送。
 - 生命周期：`amail daemon` 前台；`amail daemon install` 装 launchd LaunchAgent / systemd `--user` 单元；pid 文件单实例锁。
 
