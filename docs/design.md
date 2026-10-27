@@ -122,6 +122,7 @@ sequenceDiagram
 
 - SAS 取 `sha256(min(pkA,pkB) ‖ max(pkA,pkB))` 前 20 bit 映射 6 位十进制；两端同式派生，无第三方。
 - 未确认的 offer 60s 过期；`amail unpair` 即吊销（`revoked_at`），此后拒收并退信。
+- 确认签名晚于 SAS 比对：offer/answer 均不携带确认签名；比对一致后双方各自提交对 `(offerNonce‖answerNonce‖deviceId_A‖deviceId_B)` 的签名，各自收齐双签才落盘 peers（含签名/加密双公钥）。
 
 ## 8. 投递协议
 

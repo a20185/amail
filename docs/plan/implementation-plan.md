@@ -10,7 +10,7 @@
 1. Node ≥ 24（`engines`），ESM（`"type":"module"`），TypeScript strict，构建仅 `tsc`，测试 vitest，包管理 pnpm。
 2. 依赖白名单（Phase 0 一次性声明，后续阶段不得改 package.json）：运行时 `zod`、`commander`、`@homebridge/ciao`、`ulid`；开发 `typescript`、`vitest`、`@types/node`。加密/存储用 `node:crypto`/`node:sqlite`，禁止引入其他运行时依赖。
 3. **注册表模式**（为文件所有权隔离而设，P2/P3 落地后 P4–P8 只新增文件）：
-   - daemon 路由自动发现：发现基准 = router 模块自身目录的兄弟 `routes/` 目录（tsc 后即 `dist/daemon/routes/`，src/dist 布局同构），`loadRoutes(dir?)` 可注入；每个路由模块**默认导出 `Route[]`（数组，每元素 `{path, method, lan: boolean, handler}`）**、**可选导出 `init?(ctx)`（daemon 启动时统一调用一次，用于定时器/订阅等生命周期挂载）**；`lan:false` 的路由源地址非 127.0.0.1 时 403。**测试注入 `src/daemon/routes` 目录（或显式模块列表），不依赖构建产物——验收顺序 test→build 不受影响**。
+   - daemon 路由自动发现：发现基准 = router 模块自身目录的兄弟 `routes/` 目录（tsc 后即 `dist/daemon/routes/`，src/dist 布局同构），`loadRoutes(dir?)` 可注入；每个路由模块**默认导出 `Route[]`（数组，每元素 `{path, method, lan: boolean, handler}`）**、**可选导出 `init?(ctx)`（daemon 启动时统一调用一次，返回 disposer（`() => void`，清 interval/退订）；daemon 停机时统一执行全部 disposer）**；`lan:false` 的路由源地址判定 = **规范化 loopback（127.0.0.0/8 与 ::1 含 v4-mapped 均为回环），daemon 显式监听 127.0.0.1 与 ::1**。**测试注入 `src/daemon/routes` 目录（或显式模块列表），不依赖构建产物——验收顺序 test→build 不受影响**。
    - CLI 子命令自动发现：同构——发现基准 = main 模块所在目录的兄弟 `cmds/` 目录，`loadCmds(dir?)` 可注入；每模块导出 `register(program)`。
    - skill 安装整包复制：`amail skill install` 复制包内 `skills/` 下**每个**技能目录到目标目录（P5 只带 amail，P8 新增 amail-ws 无需改代码）。
 4. 每阶段 TDD：先写失败测试再实现；`pnpm test && pnpm typecheck && pnpm build` 全绿才可提交。
@@ -39,7 +39,7 @@
 - **地址**：`user@device`；zod `AddressSchema` + `parseAddress`（无 @ 或空段拒绝）。
 - **信封 envelope v1**（P0 定形，全链路唯一）：`{v:1, id:"msg_"+ULID, from, to, subject, inReplyTo:string|null, references:string[], createdAt:ISO8601, claim:{name,email}, seal:{alg:"x25519-aes256gcm", epk:b64, iv:b64(12B), body:b64}, attachments:[{id:"att_"+ULID, name, sha256:hex64, size:number}], sig:b64}`。`sig` 覆盖除 `sig` 外全部字段的规范 JSON 串（键序按 zod 声明序）。密封体 = `{body:string, handoff?:{progress,description,questions[]}, attachmentIds:string[]}`。**投递载荷 `DeliverReq{envelope, parts:[{id, seal}]}`：附件字节逐个对收件设备密封（设计 §5"附件逐个独立密封传输"的契约落点），`envelope.attachments[].id` 与 `parts[].id` 一一对应**。
 - **回执**：`{messageId, kind:"delivered"|"read", at, sig}`（sig 为发方设备签名）。
-- **工作区事件**：提交形 `{actor:地址, kind, payload, at, sig}`——`sig` 覆盖此四段（**不含 seq**）；房主验签通过后分配 `seq`，入库与广播的完整事件 = `{seq, actor, kind, payload, at, sig}`；payload 见 P6。
+- **工作区事件**：提交形 `{eventId:"we_"+ULID, actor:地址, kind, payload, at, sig}`——`sig` 覆盖此五段（**不含 seq**）；房主按 `eventId` 幂等（重复提交返回原 seq）；验签通过后分配 `seq`，入库与广播的完整事件 = `{seq, eventId, actor, kind, payload, at, sig}`；payload 见 P6。
 - **路径**：`AMAIL_HOME` env 优先；否则 `~/.config` 存在 → config `~/.config/amail/`、data `~/.local/share/amail/`；否则统一 `~/.amail/`。
 
 <!-- PHASE-0-START -->
@@ -61,12 +61,12 @@
 - tsconfig：strict、NodeNext、outDir dist、include src；vitest：environment node、include `src/**/*.test.ts`。
 - `address.ts`：`AddressSchema`（`user@device`，两段非空、禁空格与 @）、`parseAddress/formatAddress`。
 - `envelope.ts`：`EnvelopeSchema`、`SealedBodySchema`（上表形状）、`canonicalJson(value)`（键序=zod 声明序、无空白）、`HandoffSchema{progress:string≤2000, description:string≤4000, questions:string[]1..10}`、信封级校验：`attachments[].size ≥ 0`、`references` 含 `inReplyTo`（若非空）。
-- `identity.ts`：`UserClaimSchema{name,email}`、`DeviceIdentitySchema{deviceId(16hex 指纹), deviceName, claim}`、`PeerRecordSchema{deviceId, deviceName, user, device, claim, pubKeyPem, pairedAt, revokedAt:null|ISO}`。
+- `identity.ts`：`UserClaimSchema{name,email}`、`DeviceIdentitySchema{deviceId(16hex 指纹), deviceName, claim, signPubKeyPem, encPubKeyPem}`、`PeerRecordSchema{deviceId, deviceName, user, device, claim, signPubKeyPem, encPubKeyPem, pairedAt, revokedAt:null|ISO}`——**签名公钥与加密公钥是两个独立字段，不可混用**。
 - `attachment.ts`：`AttachmentMetaSchema`（envelope 内形状）+ `ArtifactMetaSchema{artifactId:"art_"+ULID, name, mime, size, note?, tags:string[], sha256}`。
 - `receipt.ts`：`ReceiptSchema`（上表形状）。
-- `pair.ts`：`PairOfferSchema{deviceId,deviceName,claim,signPubKeyPem,encPubKeyPem,nonce,sig}`、`PairAnswerSchema{…同构+offerNonce, sig, confirmSig}`——offer/answer 的 `sig` 为各自设备对自身全部字段（含 nonce，不含 sig/confirmSig）的签名；`confirmSig` 为 answer 方对 `(offerNonce‖answerNonce‖deviceId_A‖deviceId_B)` 规范串的签名；`PairConfirmSchema{offerSig(=A 方对同一规范串的签名), answerSig(=answer 的 confirmSig 回传), at}`。
+- `pair.ts`：`PairOfferSchema{deviceId,deviceName,claim,signPubKeyPem,encPubKeyPem,nonce,sig}`、`PairAnswerSchema{…同构+offerNonce, sig}`——offer/answer 的 `sig` 为各自设备对自身全部字段（含 nonce，不含 sig）的签名；**两类消息都不携带确认签名——确认签名只在 SAS 比对之后产生**：`PairConfirmSigSchema{offerNonce, answerNonce, deviceIdA, deviceIdB, sig(签署方对 `(offerNonce‖answerNonce‖deviceId_A‖deviceId_B)` 规范串的签名)}`，A/B 各自提交自己的 confirmSig。
 - `workspace.ts`：`WorkspaceEventSchema` + 判别联合 payload：`action{who:地址, content:string≤1000, note?, cc:地址[]}`、`todo{id:"td_"+ULID, title, priority:0|1|2|3, dueRange?{from,to}, status:"todo"|"doing"|"done"|"dropped"}`、`artifact`（=ArtifactMeta）、`membership{op:"add"|"remove", member:地址}`、`session.attach{sessionId, cli:"claude-code"|"pi"|"opencode", cwd, title?}`、`session.detach{sessionId}`。
-- `api.ts`：DTO——`AliveInfoSchema{user, deviceName, fingerprint, version, pairedCount}`、`InboxQuerySchema{project?, unread?, all?}`、`SendMessageReqSchema{to, subject, body≤4000, inReplyTo?, refs:string[], handoff?}`、`DeliverReqSchema{envelope:EnvelopeSchema, parts:[{id, seal:SealSchema}]}`、`DeliverResSchema{deliveredAt}`、`WorkspaceSyncQuerySchema{since:number}`、`MirrorEventSchema{t:"msg"|"diff"|"end", sessionId, n:number(每会话单调递增序，由房主 hub 分配), role?, text?, path?, before?, after?}`。
+- `api.ts`：DTO——`AliveInfoSchema{user, deviceName, fingerprint, version, pairedCount}`、`InboxQuerySchema{project?, unread?, all?}`、`SendMessageReqSchema{to, subject, body≤4000, inReplyTo?, refs:string[], handoff?}`、`DeliverReqSchema{envelope:EnvelopeSchema, parts:[{id, seal:SealSchema}]}`、`DeliverResSchema{deliveredAt}`、`WorkspaceSyncQuerySchema{since:number}`、`RawMirrorEventSchema{t, sessionId, role?, text?, path?, before?, after?}`（适配器产出，无序号）与 `MirrorEventSchema{…RawMirrorEvent, n:number(工作区级镜像流统一单调递增序，由房主 hub 分配，跨会话共享)}`。
 - 每个测试文件：合法样例 round-trip（parse→canonicalJson→parse 等值）+ ≥3 个非法样例拒绝（字段缺失/类型错/超界）。
 
 **Accept**：`pnpm install && pnpm test && pnpm typecheck && pnpm build` 全绿；`dist/contract/index.js` 存在。
@@ -88,7 +88,7 @@
 **Contract**
 
 - `paths.ts`：`resolveDirs(env)` → `{home, configDir, dataDir, projectsDir, storePath, attachmentsDir, keysDir, peersDir}`；规则=共享契约·路径；自动 mkdir（0700）。
-- `db.ts`：`openStore(storePath)` → `DatabaseSync`（WAL、foreign_keys ON）；`migrate(db)` 幂等建表（单版本 schema_version=1）：`messages(id PK, direction'in'|'out', from_addr,to_addr,subject,in_reply_to,thread_root,created_at,received_at,read_at,archived_at,project,body,handoff_json,sig_valid)`、`attachments(id PK,message_id FK,blob_path,…)含 artifact 复用列(name,mime,size,sha256,note,tags_json)`、`receipts(message_id,kind,at)`、`peers(device_id PK,…=PeerRecord 列)`、`outbox(id PK,payload_json(DeliverReq 完整序列化),attempts,next_retry_at,last_error,created_at,expires_at,state'queued'|'delivered'|'expired')`、`workspace_events(workspace_id, seq, source'local'|'remote', event_json, PRIMARY KEY(workspace_id, seq))`、`workspaces(id PK,name,project_slug,host_addr,created_at)`、`meta(key PK,value)`；FTS5：`messages_fts(body, tokenize='trigram')` + 触发器同步。
+- `db.ts`：`openStore(storePath)` → `DatabaseSync`（WAL、foreign_keys ON）；`migrate(db)` 幂等建表（单版本 schema_version=1）：`messages(id PK, direction'in'|'out', from_addr,to_addr,subject,in_reply_to,thread_root,created_at,received_at,read_at,archived_at,project,body,handoff_json,sig_valid)`、`attachments(id PK,message_id FK,blob_path,…)含 artifact 复用列(name,mime,size,sha256,note,tags_json)`、`receipts(message_id,kind,at)`、`peers(device_id PK,…=PeerRecord 列，含 sign_pub_pem 与 enc_pub_pem 两列)`、`outbox(id PK,payload_json(DeliverReq 完整序列化),attempts,next_retry_at,last_error,created_at,expires_at,state'queued'|'delivered'|'expired')`、`workspace_events(workspace_id, seq, source'local'|'remote', event_json, PRIMARY KEY(workspace_id, seq))`、`workspace_event_ids(event_id PK, workspace_id, seq)`（提交幂等索引）、`workspaces(id PK,name,project_slug,host_addr,created_at)`、`meta(key PK,value)`；FTS5：`messages_fts(body, tokenize='trigram')` + 触发器同步。
 - `identity.ts`：`loadOrCreateIdentity(dirs)`：单一 32B 种子落 `keys/device.pem` 0600，**派生两对密钥——Ed25519（签名）与 X25519（加密）**；导出 `signPubPem`/`encPubPem` 与指纹 `fingerprint()`（sha256(signPub) 前 16hex）；`deviceName()`（hostname，冲突处理归 mDNS 层）；`buildClaim(name,email)` 签名自声明。
 - `crypto.ts`：`sealBody(recipientEncPubPem, plainBuf)`→Seal（ephemeral X25519 + HKDF 派生 AES-256-GCM 密钥 + 12B iv；**加密一律用对端 X25519 公钥，签名用 Ed25519，两者不可互换**）、`openBody(encPrivPem, seal)`、`signCanonical(priv, obj)`、`verifyCanonical(pub, obj, sig)`、`sha256Hex(buf)`、`sas6(pubA,pubB)`（sha256(min‖max 规范字节) 前 20bit → 6 位十进制，双方一致）。
 - `store.ts`：`saveInbound(db, env, {sigValid})`（事务：message+attachments+fts）、`saveOutbound`、`listInbox(db,{project?,unread?,all?})`（默认=未归档）、`get`/`markRead`/`markArchived(id, project)`、`search(db, q)`（≥3 字走 FTS trigram，否则 LIKE）、`threadOf(id)`（按 thread_root）。
@@ -114,14 +114,14 @@
 
 **Contract**
 
-- `router.ts`：实现全局约束 3 的路由发现——发现基准 = router 模块兄弟 `routes/` 目录，`loadRoutes(dir?)` 可注入（测试注入 `src/daemon/routes`，不依赖构建产物）；路由模块默认导出 `Route[]`、可选导出 `init?(ctx)`（启动时统一调用）；`ctx={req, res, db, dirs, identity, bus, params, query, body}`；非 lan 路由源 IP ≠127.0.0.1 → 403。
-- `server.ts`：`startDaemon({port=36969, dirs})`：单例 pid 锁（`data/daemon.pid`，占用即退出码 3）；SSE `GET /v1/events`（`text/event-stream`，事件 `{type, data}`：new-mail/receipt/outbox/pairing）；优雅停机。端口可注入（测试用 0）。
+- `router.ts`：实现全局约束 3 的路由发现——发现基准 = router 模块兄弟 `routes/` 目录，`loadRoutes(dir?)` 可注入（测试注入 `src/daemon/routes`，不依赖构建产物）；路由模块默认导出 `Route[]`、可选导出 `init?(ctx)`（启动时统一调用、收集 disposer）；`ctx={req, res, db, dirs, identity, bus, params, query, body}`；非 lan 路由按**规范化 loopback** 判定（127.0.0.0/8、::1、v4-mapped 均放行，其余 403）。
+- `server.ts`：`startDaemon({port=36969, dirs})`：单例 pid 锁（`data/daemon.pid`，占用即退出码 3）；监听 127.0.0.1 与 ::1；SSE `GET /v1/events`（`text/event-stream`，事件 `{type, data}`：new-mail/receipt/outbox/pairing）；**优雅停机：执行全部 init disposer、关 bus、关 server**。端口可注入（测试用 0）。
 - `sse.ts`：`EventBus`（on/emit/close-all）。
 - `mdns.ts`：`advertise(dirs, port)`（ciao，`_amail._tcp`，TXT `{fp,user,ver}`）；`browsePeers(timeoutMs)` → `[{name, host, port, txt}]`；测试注入 fake 实现（不真发组播）。
 - `notify.ts`：`notify(title, body)`：darwin `osascript -e 'display notification …'`；linux `notify-send`；其他平台 no-op；`AMAIL_NOTIFY_CMD` 覆盖（测试用）。
 - `routes/alive.ts`：GET /alive，lan=true → `AliveInfo`（peers 计数来自 db）。
 - `routes/inbox.ts`：GET `/v1/inbox`（InboxQuery → **默认视图 = 未归档 + project 对应已归档件合并**（daemon 层做合并；CLI 经 resolveProjectByCwd 解析 slug 后作 project 参数，显式覆盖优先，`--all` 全量）→ 列表：id/from/subject/snippet/unread/receivedAt/hasHandoff）、GET `/v1/message/:id`（全文+handoff+附件元数据+blob 路径）、POST `/v1/read` `{id}`（标记+emit receipt 事件）、POST `/v1/archive` `{id, project}`（调用本阶段 `core/project.ts` 的 `exportArchive`+`markArchived`）、GET `/v1/search?q=`（store.search 封装）。
-- `routes/send-local.ts`：POST `/v1/send`（SendMessageReq）：to 已配对→密封（P1 sealBody，收件人 pub 来自 peers）+签名；`refs` 读取文件→envelope.attachments 元数据 + `parts`（附件字节逐个 sealBody 密封）→组装完整 DeliverReq→saveOutbound+outbox.enqueue+emit outbox；未配对→202 带 `warning:"not-paired"` 且只存草稿不入出箱。返回 `{messageId}`。
+- `routes/send-local.ts`：POST `/v1/send`（SendMessageReq）：to 未配对 → **409 `{error:"not-paired"}`（明确拒绝并提示先 `amail pair`；不产生草稿死状态）**；已配对→密封（P1 sealBody，收件人 encPub 来自 peers）+签名；`refs` 读取文件→envelope.attachments 元数据 + `parts`（附件字节逐个 sealBody 密封）→组装完整 DeliverReq→saveOutbound+outbox.enqueue+emit outbox。返回 `{messageId}`。
 - 测试：ephemeral 端口 fetch：非 lan 路由以伪造 remoteAddress 403；/alive 200 形状；send→SSE 收到 outbox 事件；read→receipt 事件。
 
 **Accept**：全局约束 4 全绿；daemon 在随机端口可起可停（测试内）。
@@ -138,7 +138,6 @@
 | 路径 | 操作 |
 |---|---|
 | src/cli/main.ts、src/cli/cmds/{setup,daemon,identity,project,inbox,read,archive,search,watch}.ts | Create |
-| src/core/project.ts | Create |
 | 同名 .test.ts | Create |
 
 **Contract**
@@ -174,13 +173,13 @@
 
 **Contract**
 
-- `routes/pair.ts`（lan=true）：状态机 `offer→answer→confirm`，60s 过期：A `POST /v1/pair/offer`（PairOffer，含双公钥）；B `POST /v1/pair/answer/:offerNonce`（PairAnswer，含双公钥与 confirmSig）；双方各自 sas6 派生并经 SSE `pairing` 事件+CLI 展示 6 位码；比对一致后 A 构造 offerSig，`POST /v1/pair/confirm/:offerNonce`（PairConfirm{offerSig, answerSig}）→ 校验双签后双方 `peers` 落盘（含 encPubKeyPem）。B 端发起对称同构。
+- `routes/pair.ts`（lan=true）：状态机 `offer→answer→SAS 比对→双确认→落盘`，60s 过期：A `POST /v1/pair/offer`（PairOffer，含双公钥）；B `POST /v1/pair/answer/:offerNonce`（PairAnswer，**不含确认签名**）；两端各自 sas6 派生并经 SSE `pairing` 事件+CLI 展示 6 位码；**比对一致后双方各自** `POST /v1/pair/confirm/:offerNonce`（PairConfirmSig，仅自己的签名）；双方各收齐两个 confirmSig 后校验并 `peers` 落盘（含双公钥）。B 端发起对称同构。
 - `core/peer.ts`：peers CRUD：`isPaired(db, addr)`、`savePeer`、`revokePeer`（unpair 后拒收）。
-- `core/delivery.ts`：`attemptDelivery(deliverReq, peerAddr)`：解析 mDNS 缓存/peers 里最近地址（TXT 指纹校验=peers 记录指纹）→ `POST http://peer/v1/deliver` 5s 超时；成功 `markDelivered`。**生命周期经 `routes/deliver.ts` 的 `init(ctx)` 挂载**：daemon 启动 `setInterval(30s)` 扫 `due` 重试（P1 退避），`expireDue` 通知发件人（notify+bus），订阅 bus `outbox`（send-local 入箱即发事件）→ 立即 attemptDelivery 一次（在线秒达），失败回退出箱由 30s 扫描重试；另订阅 bus `receipt`（read 事件）→ 对已配对发件人投递 read 回执（失败仅记日志不重试风暴）。
+- `core/delivery.ts`：`attemptDelivery(deliverReq, peerAddr)`：解析 mDNS 缓存/peers 里最近地址（TXT 指纹校验=peers 记录指纹）→ `POST http://peer/v1/deliver` 5s 超时；成功 `markDelivered`。**生命周期经 `routes/deliver.ts` 的 `init(ctx)` 挂载（返回 disposer，daemon 停机清理）**：daemon 启动 `setInterval(30s)` 扫 `due` 重试（P1 退避），`expireDue` 通知发件人（notify+bus），订阅 bus `outbox`（send-local 入箱即发事件）→ 立即 attemptDelivery 一次（在线秒达），失败回退出箱由 30s 扫描重试；另订阅 bus `receipt`（read 事件）→ 对已配对发件人投递 read 回执（失败仅记日志不重试风暴）。
 - `routes/deliver.ts`（lan=true）：验签（设备在 peers 且未吊销；`verifyCanonical`）→ **时间窗：仅拒"未来信"（createdAt > now+10min 即拒）；不设下限——历史信重放由 `id` 去重（同 id 幂等 200）与签名覆盖 id（伪造新 id 需私钥）共同防护，从而与 72h 出箱重试不冲突** → `id` 去重（已存在直接 200 幂等）→ `openBody` → **逐 part `openBody` 解密附件字节→sha256 与 envelope.attachments 比对→落 blob**（`attachments/<前2位>/<hash>`，去重复用）→ `saveInbound` → `notify` + bus `new-mail` → 200 `DeliverRes`。任一失败 4xx + safe error code。
 - `routes/receipt.ts`（lan=true）：验签 → `receipts` 落库 + bus。
 - `cmds/peers.ts`：`amail peers [--scan]`（mdns browse 列出可配对设备：name/host/fp/user）；`cmds/pair.ts`：`amail pair <user@device>`（发起或应答按对端状态自动）、`--confirm`、`amail unpair <addr>`；`cmds/send.ts`：`send <to> --subject --body [--ref path]…`（refs→附件元数据+parts 密封，daemon 组装 DeliverReq）；`cmds/reply.ts`：`reply <msgId> --body [--ref]…`（inReplyTo/thread 链接续）；`cmds/status.ts`：调 daemon `GET /v1/status`（daemon/未读/出箱/peers 概况）。
-- 测试（进程内双 daemon e2e，两套 AMAIL_HOME 沙箱+两随机端口+fake mdns）：配对双方 SAS 相等；**offerSig 篡改 401**；A→B 直投（含 1 个附件 part）B 落库+附件哈希校验通过+notify 事件+delivered；篡改 sig 401；重放（同 id 二投）幂等 200；过期窗外 4xx；B 离线→A 出箱→恢复后重试成功；**send 后在线对端 1s 内收到（即时直投）**；read→A 收到 read 回执；吊销后拒收。
+- 测试（进程内双 daemon e2e，两套 AMAIL_HOME 沙箱+两随机端口+fake mdns）：配对双方 SAS 相等；**confirmSig 篡改 401**；A→B 直投（含 1 个附件 part）B 落库+附件哈希校验通过+notify 事件+delivered；篡改 sig 401；重放（同 id 二投）幂等 200；**未来信（createdAt > now+10min）4xx、历史时间戳（< now-1h）过窗**；B 离线→A 出箱→恢复后重试成功；**send 后在线对端 1s 内收到（即时直投）**；read→A 收到 read 回执；吊销后拒收。
 
 **Accept**：全局约束 4 全绿；上述 e2e 场景逐条为独立测试。
 
@@ -227,8 +226,8 @@
 **Contract**
 
 - `events.ts`：`applyEvent(state, event)` 纯函数折叠 → `WorkspaceState{actions[], todos[], artifacts[], members[], attached[]}`（todo 按 id upsert 状态机；action 追加；membership 增删；artifact upsert）。
-- `host.ts`：`WorkspaceHost(db, workspaceId)`：`submit(signedEvent)`：验 actor 为成员且签名有效（**sig 覆盖 {actor,kind,payload,at}，不含 seq**）→ **分配 `seq=lastSeq+1`** → 事务写完整事件 `{seq,…}` → bus 广播 `ws-event`；`eventsSince(seq)`；`state()`（折叠）。
-- `routes/workspace.ts`（lan=true）：`POST /ws/:id/events`（提交）、`GET /ws/:id/events?since=N` **双形态：`Accept: text/event-stream` → SSE 实时订阅（房主先回放 >since 的存量事件，再实时推送 bus 事件——补拉与订阅经 since 游标无缝衔接）；否则 JSON 补拉**、`GET /ws/:id/state`、`POST /ws/:id/invite`（房主签发邀请块）。action 事件 `cc[]` → 房主为每个 cc 成员 enqueue 信件通知（复用 P4 delivery，正文=一行摘要+workspace 引用）。
+- `host.ts`：`WorkspaceHost(db, workspaceId)`：`submit(signedEvent)`：**先按 `eventId` 幂等（已存在返回原 seq，不重复追加/不重复 CC 通知）** → 验 actor 为成员且签名有效（**sig 覆盖 {eventId,actor,kind,payload,at}，不含 seq**）→ **分配 `seq=lastSeq+1`** → 事务写完整事件 + event_ids 索引 → bus 广播 `ws-event`；`eventsSince(seq)`；`state()`（折叠）。
+- `routes/workspace.ts`（lan=true）：`POST /ws/:id/events`（提交）、`GET /ws/:id/events?since=N` **双形态：`Accept: text/event-stream` → SSE（实现序：先建立订阅并缓冲实时事件，再回放 >since 的存量，按游标去重后放行——回放/订阅间隙不丢事件）；否则 JSON 补拉**、`GET /ws/:id/state`、`POST /ws/:id/invite`（房主签发邀请块）。action 事件 `cc[]` → 房主为每个 cc 成员 enqueue 信件通知（复用 P4 delivery，正文=一行摘要+workspace 引用）。
 - `invite.ts`：`buildInvite(ws)`（`{workspaceId, name, hostAddr, hostDeviceId, sig}`）；`acceptInvite(dirs, invite)`：本地登记 workspace（`workspaces` 表，hostAddr 指向房主）+ 生成 membership add 事件提交房主。邀请块随信件正文送达（skill/CLI 引导粘贴或文件）。
 - `projection-local.ts`：成员端 `syncFromHost()`（GET events?since=本地最大 remote seq → 存 `workspace_events(source='remote')`）+ `localState()`（离线只读）。
 - `cmds/ws.ts`：`ws create --project <slug> [--name]`（本地建 workspace，host=本机）；`ws invite <to>`（生成邀请块并发信）；`ws accept <--file invite.json | --mail <msgId>`；`ws state [--kind actions|todos|artifacts|members]`；`ws action --who <addr> --content <t> [--note] [--cc <addr>]…`；`ws todo add <title> [--priority --due from,to]`（**title 为位置参数**）、`ws todo set <id> [--status --priority --due]`；**`ws export [--out dir]`（投影导出 markdown：actions/todos/artifacts 三文件，Backlog.md 可读形）**。
@@ -254,12 +253,12 @@
 
 **Contract**
 
-- `types.ts`：`MirrorAdapter{ id:"claude-code"|"pi"|"opencode", discover(cwd?):SessionMeta[], stream(sessionId):AsyncIterable<MirrorEvent> }`；`SessionMeta{sessionId, cli, cwd, title?, startedAt, mtime}`；`MirrorEventSchema`（共享契约 api.ts）。根路径一律可注入（默认 `~/.claude`、`~/.pi/agent/sessions`、`~/.local/share/opencode`）。
+- `types.ts`：`MirrorAdapter{ id:"claude-code"|"pi"|"opencode", discover(cwd?):SessionMeta[], stream(sessionId):AsyncIterable<RawMirrorEvent> }`（**适配器只产 RawMirrorEvent——无序号；序号由房主 hub 分配后才是 MirrorEvent**）；`SessionMeta{sessionId, cli, cwd, title?, startedAt, mtime}`；schema 见共享契约 api.ts。根路径一律可注入（默认 `~/.claude`、`~/.pi/agent/sessions`、`~/.local/share/opencode`）。
 - `claude-code.ts`：project 目录 slug = cwd 绝对路径中 `/`→`-`（验证：`/Users/souler/Test` → `-Users-souler-Test`）；`*.jsonl` 按 mtime 识别活跃；stream=**增量尾随**：`fs.watch` 目标文件 + 记字节偏移增量读（watch 静默/ENOENT 时 500ms 轮询兜底），新增一行即产事件——assistant 消息文本→`msg`；tool_use **按工具分列映射：Edit→{before:old_string, after:new_string}；Write→{before:null, after:content}；NotebookEdit→{before:null, after:new_source}**。验收含「fixture 追加一行 → 适配器 2s 内产出对应 MirrorEvent」断言（三类工具各有 fixture 验收）。hooks 不装（避免改用户 settings.json）；未来可作可选加速器，`MirrorEvent` 接口不变。
 - `pi.ts`：同构 jsonl（`<时间戳>_<uuid>.jsonl`），增量尾随与兜底同 claude-code；消息/工具调用映射以 fixture 实测字段为准，映射写在文件头注释。
 - `opencode.ts`：只读打开 `opencode.db`（WAL 只读模式）——**已裁定偏差五（见全局约束 7）：直读本地 db 而非 service API，理由=无服务依赖、可 fixture 测试**；**fixture-first**：实现前先把本机真实 db 拷贝脱敏为 `tests/fixtures/mirror/opencode.db`（只留 schema+少量行），按实际表映射 session/message→MirrorEvent，映射表写文件头注释；接受标准=fixture 测试绿。
-- `hub.ts`：适配器注册表；`attachableList()`（各 adapter.discover 合并）；**attach（无论发起者是房主还是成员）先经 host.submit 提交 `session.attach` 审计事件（落 workspace_events、投影 attached[]）；随后开本地流→若是成员，逐事件 `POST /ws/:id/mirror/:sessionId/event`（带上行游标 after=n）上行房主；房主 hub 收流后分配每会话单调 `n`、写入内存环形缓冲（最近 200 条，不落库）并扇出到镜像 SSE**；`detach(sessionId)` 提交 `session.detach` 审计事件+断流清缓冲；连接断开自动 detach。
-- `routes/mirror.ts`：`GET /ws/:id/mirror?after=n`（SSE 订阅：先回放环形缓冲中 >n 的事件再实时，**n 为衔接游标，消除快照-订阅间隙丢事件**）、`GET /ws/:id/mirror/attachable`、`POST /ws/:id/mirror/attach`、`DELETE /ws/:id/mirror/:sessionId`、`GET /ws/:id/mirror/:sessionId/recent`（返回 `{events[], lastN}` 供晚加入者取游标起点）、`POST /ws/:id/mirror/:sessionId/event`（成员上行通道）。
+- `hub.ts`：适配器注册表；`attachableList()`（各 adapter.discover 合并）；**attach（无论发起者是房主还是成员）先经 host.submit 提交 `session.attach` 审计事件（落 workspace_events、投影 attached[]）；随后开本地流→若是成员，逐事件 `POST /ws/:id/mirror/:sessionId/event` 上行房主；房主 hub 收到 RawMirrorEvent 后分配工作区级统一单调 `n`（跨会话共享单序），生成 MirrorEvent 写入内存环形缓冲（最近 200 条，不落库）并扇出到镜像 SSE**；`detach(sessionId)` 提交 `session.detach` 审计事件+断流清缓冲；连接断开自动 detach。
+- `routes/mirror.ts`：`GET /ws/:id/mirror?after=n`（SSE：**先建立订阅并缓冲，再回放环形缓冲中 >n 的事件，按 n 去重后放行——衔接不丢事件**；n 为工作区级游标）、`GET /ws/:id/mirror/attachable`、`POST /ws/:id/mirror/attach`、`DELETE /ws/:id/mirror/:sessionId`、`GET /ws/:id/mirror/recent`（返回工作区级 `{events[], lastN}` 供晚加入者取游标起点）、`POST /ws/:id/mirror/:sessionId/event`（成员上行通道）。
 - `cmds/attach.ts`：`amail attach [--cli cc|pi|opencode] [--cwd path]`（列选择交互/`--session <id>` 直选）、`amail detach <sessionId>`、`amail attach --list`。
 - 测试：fixture jsonl（从真实根拷贝脱敏）→ claude-code/pi 适配器产出 msg+diff 事件序（**Edit/Write/NotebookEdit 三类工具映射各有断言**）；opencode fixture db 同；双 daemon：**成员侧** attach→审计事件恰一条落 workspace_events→上行→B 端 SSE 按 n 游标完整收到（含 recent→SSE 衔接不丢事件）→detach 后静默；MirrorEvent 数据不落 workspace_events（表内仅 attach/detach 审计事件断言）。
 
