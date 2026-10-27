@@ -6,8 +6,10 @@
 
 - 领域词汇表：[CONTEXT.md](CONTEXT.md)
 - 设计全案：[docs/design.md](docs/design.md)
-- 架构决策：[docs/adr/0001-thin-core-not-agentmbx.md](docs/adr/0001-thin-core-not-agentmbx.md)
+- 架构决策：[ADR-0001 薄自研核心](docs/adr/0001-thin-core-not-agentmbx.md) · [ADR-0002 工作区房主权威](docs/adr/0002-workspace-host-authoritative.md)
 - 开源调研与依赖健康审计：[docs/research/oss-landscape.md](docs/research/oss-landscape.md)
+
+第二轮（同日）：新增**共享工作区**——挂在项目下的房主权威事件空间（action-list / todo-list / session 只读镜像 / artifacts），P2P + 中心服务双宿主协议，见设计全案 §17 与 ADR-0002。
 
 ## 一句话形态
 

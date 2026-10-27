@@ -43,3 +43,16 @@ npm 名（registry API 实测）：
 ## 4. 结论
 
 无现成 OSI 开源项目覆盖「用户级身份 + LAN P2P + 信箱语义 + agent skills」全组合；走薄自研核心 + 上述 MIT 组件，直接运行时依赖仅 ciao 与 commander，Node 基线 ≥ 24。
+
+## 5. 工作区第二轮调研（2026-10-27）
+
+| 先例 | 是什么 | 许可 / 规模 | 裁决 |
+|---|---|---|---|
+| Multica | 人 + agent 混编团队的共享项目空间：issue + 执行日志回放 + diff + steering + inbox，26 个 agent CLI（含 Pi） | **License: Other（source-available 非 OSI）**，54.0k★ | 概念样板（该类目最强），不可作基座（同 agentmbx 的许可坑） |
+| Backlog.md | markdown + git 任务管理，三道评审检查点 | MIT，7.2k★ | **adapt**：todo 形态蓝本、导出兼容 |
+| happy | 包装 CLI + E2EE relay + 多人共看 / 驾驶 session | MIT，24.3k★ | **adapt**：session 镜像可行性证明；relay → LAN P2P |
+| vibe-kanban | 看板 + worktree 编排执行 agent | Apache-2.0，28.5k★，**sunset 中** | skip（重一个量级且停摆） |
+| Huly / Plane | 开源 Linear+Slack+Notion 全家桶 | AGPL-3.0 | skip（中心服务栈，与 P2P 形态冲突） |
+| Yjs / Automerge | CRDT 共享数据类型 | MIT | skip（低频结构化写零收益） |
+
+结论：业界"统一方案"存在（Multica / Huly / Plane / Linear+MCP）但**全部中心化**（云或自托管栈），无 P2P / LAN 形态。工作区按件取材：todo ← Backlog.md 形态、session 镜像 ← happy、统一承载 = 房主权威事件协议（ADR-0002）。

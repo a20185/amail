@@ -6,7 +6,7 @@
 
 **目标**：给「人 + 其 agent」一个局域网点对点信箱——npm 包 `agent-mail`（bin：`amail`）+ CLI + 每设备一个守护进程 + agent skills。人收信、agent 经手；支持查看 / 线程内回信 / 发信 / 运行中 handoff（进展 + 描述 + 问题打包为附件寄给某人）。
 
-**非目标（明确延后，§16）**：共享 session、群聊 / raft 式多边上下文、跨网 relay、agent 空闲唤醒、多设备同用户聚合视图。
+**非目标（明确延后，§16）**：群聊 / raft 式多边上下文、session 驾驶（steering）、跨网 relay、中心服务宿主（协议已预留）、agent 空闲唤醒、多设备同用户聚合视图。工作区的只读 session 镜像已纳入目标（§17）。
 
 ## 2. 决策总表
 
@@ -197,7 +197,52 @@ sequenceDiagram
 | M3 | CLI 全集 + setup + project | 双项目多仓登记、默认视图正确 |
 | M4 | 配对 + 投递 + 出箱 + 回执 | **双真机 e2e**：配对→发→收→读→回执；离线重试与 72h 过期演练 |
 | M5 | skill + handoff | Claude Code 会话内完成 查看回信 + handoff 全流程 |
+| M6 | 工作区核心：房主事件序 + 投影 + 邀请信 | 双机 e2e：创建→邀请→提交事件→两端视图一致 |
+| M7 | session 镜像：Claude Code / Pi / OpenCode 三适配器 + attach + SSE 扇出 | 双机 e2e：attach 后对端实时见 messagelist/diff；detach 即断 |
+| M8 | artifacts + skill 面扩展 | 会话内 attach / 提交 artifact / 查 todo / 写 action（CC 通知落信箱） |
 
 ## 16. 延后清单
 
-跨网 relay（届时评估 @number0/iroh 作传输层，信封语义不动）、群聊 / raft、共享 session、agent 空闲唤醒（wake）、多设备同用户聚合视图、按仓库自动归档分类、其他 harness 的 skill、Windows mDNS 专项验证、附件大小上限与配额策略（v1 实现时定）。
+跨网 relay（届时评估 @number0/iroh 作传输层，信封语义不动）、中心服务宿主（workspace 协议已双宿主预留）、群聊 / raft、session 驾驶（steering）、session 自动圈定、agent 空闲唤醒（wake）、多设备同用户聚合视图、按仓库自动归档分类、其他 harness 的 skill 与适配器（Codex 等）、Windows mDNS 专项验证、附件大小上限与配额策略（v1 实现时定）。
+
+## 17. 工作区（workspace，2026-10-27 第二轮裁决）
+
+挂在项目下的共享项目空间：一处统一上下文，成员（人，agent 经手）更新与交换。四大视图：action-list、todo-list、sessions（镜像）、artifacts。术语见 CONTEXT.md「Workspace Language」。
+
+### 17.1 架构：房主权威 + 双宿主协议
+
+- **房主（默认创建人设备）是唯一真源**：成员签名提交事件 → 房主验签验成员资格 → 定序追加 → SSE 实时广播 → 各端本地缓存并投影。无多方合并逻辑（被否决的替代见 ADR-0002）。
+- **协议双宿主**：同一套 workspace 协议，宿主可为房主设备（v1）或中心服务（后续可选，跨网可用）。
+- 房主离线 = workspace 只读（吃缓存），写快速失败；信件路径不受影响。缓解：房主选常开机器；所有权转让后续。
+
+### 17.2 事件模型
+
+事件 = `{seq（房主序）, actor（成员设备）, kind, payload, at, sig（提交设备签名）}`：
+
+| kind | payload 要点 |
+|---|---|
+| action | 谁、内容、备注、CC[]（CC 触发信件通知——工作区与信箱的唯一自动联动） |
+| todo | 事项、优先级、时间范围、状态流转 |
+| artifact | 文件注册：名称/类型/大小/备注/标签 + 内容哈希 |
+| membership | 邀请 / 移除成员 |
+| session.attach / session.detach | 挂入 / 摘出会话镜像 |
+
+投影：三个列表 = 事件流的确定性折叠；可导出 markdown（Backlog.md 兼容读法）。
+
+### 17.3 准入：邀请信
+
+房主 `amail ws create`（挂本地项目）→ 发内嵌工作区邀请块的信（workspace id + 房主声明 + 房主签名）→ 对端接受即成员（前置：已配对）。成员变更本身是 membership 事件，可审计。
+
+### 17.4 sessions：显式 attach 的只读镜像
+
+- **显式 attach**：经 skill 或 CLI 把本机某活跃 agent 会话挂入 workspace；不自动圈定、不自动上报（隐私边界 = 显式意图）。
+- **只读**：messagelist + codediffs 实时流（SSE），不落库；晚加入者可拉一次当前快照。驾驶延后。
+- 采集适配器：v1 = Claude Code（hooks + session JSONL）、Pi（本地 trace）、OpenCode（service API）；Codex 后补。无适配器的 CLI 无法 attach。
+
+### 17.5 artifacts
+
+提交 = 文件上传房主 blob 存储（复用附件哈希分桶），注册为 artifact 事件广播；成员按需拉取。
+
+### 17.6 与四件诉求的对应
+
+action-list → action 事件投影；todo-list → todo 事件投影；sessions → attach 的只读镜像；artifacts → artifact 事件 + 房主 blob。
