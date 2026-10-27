@@ -227,7 +227,7 @@
 **Contract**
 
 - `events.ts`：`applyEvent(state, event)` 纯函数折叠 → `WorkspaceState{actions[], todos[], artifacts[], members[], attached[]}`（todo 按 id upsert 状态机；action 追加；membership 增删；artifact upsert）。
-- `host.ts`：`WorkspaceHost(db, workspaceId)`：`submit(signedEvent)`：验 actor 为成员且签名有效 → `seq=lastSeq+1` → 事务写 `workspace_events` → bus 广播 `ws-event`；`eventsSince(seq)`；`state()`（折叠）。SSE 通道挂在 server：`GET /ws/:id/events?since=`（lan=true，订阅 bus）。
+- `host.ts`：`WorkspaceHost(db, workspaceId)`：`submit(signedEvent)`：验 actor 为成员且签名有效 → `seq=lastSeq+1` → 事务写 `workspace_events` → bus 广播 `ws-event`；`eventsSince(seq)`；`state()`（折叠）。
 - `routes/workspace.ts`（lan=true）：`POST /ws/:id/events`（提交）、`GET /ws/:id/events?since=`（补拉 JSON）、`GET /ws/:id/state`、`POST /ws/:id/invite`（房主签发邀请块）。action 事件 `cc[]` → 房主为每个 cc 成员 enqueue 信件通知（复用 P4 delivery，正文=一行摘要+workspace 引用）。
 - `invite.ts`：`buildInvite(ws)`（`{workspaceId, name, hostAddr, hostDeviceId, sig}`）；`acceptInvite(dirs, invite)`：本地登记 workspace（`workspaces` 表，hostAddr 指向房主）+ 生成 membership add 事件提交房主。邀请块随信件正文送达（skill/CLI 引导粘贴或文件）。
 - `projection-local.ts`：成员端 `syncFromHost()`（GET events?since=本地最大 remote seq → 存 `workspace_events(source='remote')`）+ `localState()`（离线只读）。
@@ -255,8 +255,8 @@
 **Contract**
 
 - `types.ts`：`MirrorAdapter{ id:"claude-code"|"pi"|"opencode", discover(cwd?):SessionMeta[], stream(sessionId):AsyncIterable<MirrorEvent> }`；`SessionMeta{sessionId, cli, cwd, title?, startedAt, mtime}`；`MirrorEventSchema`（共享契约 api.ts）。根路径一律可注入（默认 `~/.claude`、`~/.pi/agent/sessions`、`~/.local/share/opencode`）。
-- `claude-code.ts`：project 目录 slug = cwd 绝对路径中 `/`→`-`（验证：`/Users/souler/Test` → `-Users-souler-Test`）；`*.jsonl` 按 mtime 识别活跃；stream=增量读取：assistant 消息文本→`msg`；tool_use（Edit/Write/NotebookEdit）→`diff{path, before=old_string, after=new_string}`。
-- `pi.ts`：同构 jsonl（`<时间戳>_<uuid>.jsonl`），消息/工具调用映射同上（以 fixture 实测字段为准，映射写在文件头注释）。
+- `claude-code.ts`：project 目录 slug = cwd 绝对路径中 `/`→`-`（验证：`/Users/souler/Test` → `-Users-souler-Test`）；`*.jsonl` 按 mtime 识别活跃；stream=**增量尾随**：`fs.watch` 目标文件 + 记字节偏移增量读（watch 静默/ENOENT 时 500ms 轮询兜底），新增一行即产事件——assistant 消息文本→`msg`；tool_use（Edit/Write/NotebookEdit）→`diff{path, before=old_string, after=new_string}`。验收含「fixture 追加一行 → 适配器 2s 内产出对应 MirrorEvent」断言。hooks 不装（避免改用户 settings.json）；未来可作可选加速器，`MirrorEvent` 接口不变。
+- `pi.ts`：同构 jsonl（`<时间戳>_<uuid>.jsonl`），增量尾随与兜底同 claude-code；消息/工具调用映射以 fixture 实测字段为准，映射写在文件头注释。
 - `opencode.ts`：只读打开 `opencode.db`（WAL 只读模式）；**fixture-first**：实现前先把本机真实 db 拷贝脱敏为 `tests/fixtures/mirror/opencode.db`（只留 schema+少量行），按实际表映射 session/message→MirrorEvent，映射表写文件头注释；接受标准=fixture 测试绿。
 - `hub.ts`：适配器注册表；`attachableList()`（各 adapter.discover 合并）；`attach(workspaceId, sessionId)`：开流→逐事件经房主 bus 广播到 `GET /ws/:id/mirror`（lan=true SSE，**不写 workspace_events**）；`detach(sessionId)` 断流；连接断开自动 detach。
 - `routes/mirror.ts`：`GET /ws/:id/mirror`（SSE 订阅）、`GET /ws/:id/mirror/attachable`、`POST /ws/:id/mirror/attach`、`DELETE /ws/:id/mirror/:sessionId`。
