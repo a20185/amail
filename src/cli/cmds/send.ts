@@ -7,6 +7,7 @@ export interface SendOptions {
   body?: string;
   refs?: string[];
   inReplyTo?: string;
+  handoff?: { progress: string; description: string; questions: string[] };
   env?: NodeJS.ProcessEnv;
 }
 
@@ -32,6 +33,7 @@ export async function runSend(to: string, options: SendOptions = {}): Promise<Se
       body: options.body,
       inReplyTo: options.inReplyTo,
       refs: options.refs ?? [],
+      handoff: options.handoff,
     }),
   })) as SendResult;
   console.log(`已入出箱：${result.messageId} → ${to}`);
