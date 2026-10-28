@@ -9,7 +9,7 @@ import { rawPublicKey, sas6, signCanonical, verifyCanonical } from "../../core/c
 import { fingerprint } from "../../core/identity.js";
 import { addressSegment, listPeers, revokePeer, savePeer } from "../../core/peer.js";
 import { browseNow } from "../../core/delivery.js";
-import { loadUserConfig, userAddress } from "../server.js";
+import { loadUserConfig, normalizeUser, userAddress } from "../server.js";
 
 /** 会话 60s 过期（offer→answer→confirm 全程） */
 export const PAIR_SESSION_TTL_MS = 60_000;
@@ -70,7 +70,7 @@ function peerRecordFrom(
   return {
     deviceId: source.deviceId,
     deviceName: source.deviceName,
-    user: addressSegment(source.claim.name),
+    user: normalizeUser(source.claim.name),
     device: addressSegment(source.deviceName),
     claim: source.claim,
     signPubKeyPem: source.signPubKeyPem,
@@ -222,7 +222,7 @@ const routes: Route[] = [
       bus.emit("pairing", {
         stage: "offer",
         offerNonce: offer.nonce,
-        user: `${addressSegment(offer.claim.name)}@${addressSegment(offer.deviceName)}`,
+        user: `${normalizeUser(offer.claim.name)}@${addressSegment(offer.deviceName)}`,
       });
       sendJson(res, 200, { offerNonce: offer.nonce });
     },
@@ -290,16 +290,17 @@ const routes: Route[] = [
     },
   },
   {
-    // 待应答的远端 offer 列表（应答方 CLI 据此自动转入应答模式）
+    // 待推进的远端会话列表（应答方 CLI 据此自动转入应答模式）：
+    // 未 answer 的 offer + 已 answer 未 confirm 的会话（`--confirm` 复用刚显示 SAS 的那个 nonce）
     method: "GET",
     path: "/v1/pair/pending",
     lan: false,
     handler({ res, db }) {
       const pending = [...sessions(db).values()]
-        .filter((s) => !s.local && !s.answer)
+        .filter((s) => !s.local && !s.peer)
         .map((s) => ({
           offerNonce: s.offerNonce,
-          user: `${addressSegment(s.offer.claim.name)}@${addressSegment(s.offer.deviceName)}`,
+          user: `${normalizeUser(s.offer.claim.name)}@${addressSegment(s.offer.deviceName)}`,
           deviceId: s.offer.deviceId,
         }));
       sendJson(res, 200, pending);

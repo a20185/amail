@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -96,11 +96,55 @@ describe("exportArchive", () => {
     expect(md).toContain("归档测试");
     expect(md).toContain("正文内容");
     expect(md).toContain("Handoff");
-    const copied = join(archiveDir, "attachments", env.id, "data.bin");
+    const copied = join(archiveDir, "attachments", env.id, `${"a".repeat(8)}-data.bin`);
     expect(existsSync(copied)).toBe(true);
     expect(readFileSync(copied, "utf8")).toBe("hello-bytes");
+    // 原文元数据保留原名
+    expect(md).toContain("data.bin");
     // 真源仍在
     expect(existsSync(blob)).toBe(true);
+  });
+
+  it("恶意附件名（路径穿越）拒绝落盘：不写 archive 之外，正文标记未导出", () => {
+    const { home, dirs } = setup();
+    const archiveDir = join(home, "archive");
+    const repo = join(home, "repo");
+    mkdirSync(repo);
+    writeFileSync(
+      join(dirs.projectsDir, "acme.json"),
+      JSON.stringify({ name: "Acme", repos: [repo], archiveDir }),
+    );
+    const db = openStore(dirs.storePath);
+    const blob = join(dirs.attachmentsDir, "evil.bin");
+    mkdirSync(dirs.attachmentsDir, { recursive: true });
+    writeFileSync(blob, "evil-bytes");
+
+    const env = envelope({
+      attachments: [
+        {
+          id: "att_01M61A7ADP7K8BHXT1DR1Y9E7S",
+          name: "../../evil.txt",
+          sha256: "b".repeat(64),
+          size: 10,
+        },
+      ],
+    });
+    saveInbound(
+      db,
+      env,
+      { body: "x", attachments: [{ id: "att_01M61A7ADP7K8BHXT1DR1Y9E7S", blobPath: blob }] },
+      { sigValid: true },
+    );
+
+    const mdPath = exportArchive(dirs, db, env.id, "acme");
+    const md = readFileSync(mdPath, "utf8");
+    expect(md).toContain("../../evil.txt");
+    expect(md).toContain("未导出");
+
+    const attDir = join(archiveDir, "attachments", env.id);
+    expect(existsSync(join(home, "evil.txt"))).toBe(false);
+    expect(existsSync(join(archiveDir, "attachments", "evil.txt"))).toBe(false);
+    expect(existsSync(attDir) ? readdirSync(attDir) : []).toEqual([]);
   });
 
   it("未知 project / 未知 message 抛错", () => {

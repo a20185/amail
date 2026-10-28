@@ -86,14 +86,23 @@ function artifactMeta(bytes: Buffer, overrides: Partial<ArtifactMeta> = {}): Art
   };
 }
 
-/** 原始字节上传：只带 X-Amail-Meta（事件签名即认证） */
+/** 原始字节上传：X-Amail-Meta（事件签名）+ X-Amail-Sig（统一请求签名门，绑定原始字节哈希） */
 async function uploadRaw(a: DaemonHandle, wsId: string, bytes: Buffer, meta: ArtifactMeta, signer: DaemonHandle) {
   const event = makeEvent(signer.identity.signPrivPem, signer.address, "artifact", meta);
-  return fetch(`http://127.0.0.1:${a.port}/ws/${wsId}/artifacts`, {
+  const pathname = `/ws/${wsId}/artifacts`;
+  return fetch(`http://127.0.0.1:${a.port}${pathname}`, {
     method: "POST",
     headers: {
       "content-type": "application/octet-stream",
       "X-Amail-Meta": encodeUploadMeta(event),
+      ...amailSigHeaders(
+        signer.identity.signPrivPem,
+        "POST",
+        pathname,
+        "",
+        signer.address,
+        sha256Hex(bytes),
+      ),
     },
     body: bytes,
   });
@@ -195,6 +204,52 @@ describe("ws artifacts routes: 上传→事件→两端列表→拉取校验", (
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("not-member");
     expect(new WorkspaceHost(sandbox.a, wsId).state().artifacts).toHaveLength(0);
+  });
+
+  it("上传请求签名门：缺 X-Amail-Sig 401；跨工作区重放 401 且不落库", async () => {
+    const { a, b, wsId } = await dual("upload-sig");
+    const bytes = Buffer.from("upload-sig-bytes", "utf8");
+    const meta = artifactMeta(bytes);
+    const event = makeEvent(b.identity.signPrivPem, b.address, "artifact", meta);
+
+    // 事件签名齐全但缺请求签名 → 401
+    const unsigned = await fetch(`http://127.0.0.1:${a.port}/ws/${wsId}/artifacts`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "X-Amail-Meta": encodeUploadMeta(event),
+      },
+      body: bytes,
+    });
+    expect(unsigned.status).toBe(401);
+
+    // 为 ws1 签发的请求头重放到 ws2（路径入签名）→ 401
+    const ws2 = createWorkspace(a, { name: "Other", projectSlug: "other" });
+    const invite2 = (await (
+      await hostFetch(a, `/ws/${ws2}/invite`, { method: "POST", body: {} })
+    ).json()) as WorkspaceInvite;
+    await acceptInvite(b.dirs, invite2);
+    const headers = amailSigHeaders(
+      b.identity.signPrivPem,
+      "POST",
+      `/ws/${wsId}/artifacts`,
+      "",
+      b.address,
+      sha256Hex(bytes),
+    );
+    const replay = await fetch(`http://127.0.0.1:${a.port}/ws/${ws2}/artifacts`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "X-Amail-Meta": encodeUploadMeta(event),
+        "X-Amail-Sig": headers["X-Amail-Sig"]!,
+        "X-Amail-Date": headers["X-Amail-Date"]!,
+        "X-Amail-Actor": headers["X-Amail-Actor"]!,
+      },
+      body: bytes,
+    });
+    expect(replay.status).toBe(401);
+    expect(new WorkspaceHost(a, ws2).state().artifacts).toHaveLength(0);
   });
 
   it("通用 /events 仍拒绝 artifact（422 use-upload-endpoint）", async () => {

@@ -6,14 +6,11 @@ import type { Command } from "commander";
 import { resolveDirs } from "../../core/paths.js";
 import { buildClaim, fingerprint, loadOrCreateIdentity } from "../../core/identity.js";
 import { installDaemon } from "./daemon.js";
+import { normalizeUser } from "../../daemon/server.js";
 
-/** git user.name → 地址用户名：小写 → 空格换连字符 → 删 AddressSchema 禁止字符（空白与 @）→ 空回退 user */
+/** git user.name → 地址用户名：与 daemon 实际地址规则共用 normalizeUser（小写/空格→连字符/仅 [a-z0-9-]/空回退 user） */
 export function mapGitNameToUser(name: string): string {
-  const cleaned = name
-    .toLowerCase()
-    .replaceAll(" ", "-")
-    .replace(/[\s@]+/g, "");
-  return cleaned || "user";
+  return normalizeUser(name);
 }
 
 export interface GitIdentity {

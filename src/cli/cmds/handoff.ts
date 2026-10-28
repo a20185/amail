@@ -51,6 +51,11 @@ export default function register(program: Command): void {
     .requiredOption("--question <text>", "open question for the receiver (repeatable)", (value: string, previous: string[]) => [...previous, value], [])
     .option("--ref <path>", "attachment file path (repeatable)", (value: string, previous: string[]) => [...previous, value], [])
     .action(async (to: string, opts: { progress: string; description?: string; question: string[]; ref?: string[] }) => {
-      await runHandoff(to, opts);
+      await runHandoff(to, {
+        progress: opts.progress,
+        description: opts.description,
+        question: opts.question,
+        refs: opts.ref,
+      });
     });
 }

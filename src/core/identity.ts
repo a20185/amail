@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { createPublicKey } from "node:crypto";
 import {
-  canonicalStringify,
   keyPairFromSeed,
   rawPublicKey,
   signCanonical,
 } from "./crypto.js";
+import { canonicalJson } from "../contract/envelope.js";
 import type { UserClaim } from "../contract/identity.js";
 import type { Dirs } from "./paths.js";
 
@@ -72,7 +72,7 @@ export function buildClaim(
   email: string,
 ): { claim: UserClaim; sig: string; canonical: string } {
   const claim: UserClaim = { name, email };
-  const canonical = canonicalStringify(claim);
+  const canonical = canonicalJson(claim);
   const sig = signCanonical(signPrivPem, claim);
   return { claim, sig, canonical };
 }

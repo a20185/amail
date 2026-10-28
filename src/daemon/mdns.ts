@@ -128,13 +128,16 @@ function parseTxt(rdata: Buffer): Record<string, string> {
   return txt;
 }
 
-interface SrvRecord {
+export interface SrvRecord {
   target: string;
   port: number;
 }
 
-/** 解析 mDNS 应答包，提取 _amail._tcp 实例的 SRV/TXT */
-function parseResponse(buf: Buffer): Array<{ name: string; srv?: SrvRecord; txt?: Record<string, string> }> {
+/**
+ * 解析 mDNS 应答包，提取 _amail._tcp 实例的 SRV/TXT。
+ * SRV RDATA = priority(2) weight(2) port(2) target —— port 读偏移 4。
+ */
+export function parseResponse(buf: Buffer): Array<{ name: string; srv?: SrvRecord; txt?: Record<string, string> }> {
   const qd = buf.readUInt16BE(4);
   const an = buf.readUInt16BE(6);
   const ar = buf.readUInt16BE(10);
@@ -157,7 +160,7 @@ function parseResponse(buf: Buffer): Array<{ name: string; srv?: SrvRecord; txt?
       // SRV
       const target = readName(rdata, 6);
       const entry = out.get(parsed.name) ?? { name: parsed.name };
-      entry.srv = { target: target.name, port: rdata.readUInt16BE(2) };
+      entry.srv = { target: target.name, port: rdata.readUInt16BE(4) };
       out.set(parsed.name, entry);
     } else if (type === 16) {
       // TXT

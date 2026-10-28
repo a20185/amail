@@ -95,6 +95,8 @@ export async function runArtifactSubmit(
     headers: {
       "content-type": "application/octet-stream",
       "X-Amail-Meta": encodeUploadMeta(event),
+      // 统一请求签名门：method + path + sha256(原始字节) + Date
+      ...amailSigHeaders(ctx.identity.signPrivPem, "POST", pathname, "", ctx.myAddr, sha256),
     },
     body: bytes,
   });

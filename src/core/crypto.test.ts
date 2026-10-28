@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, sign as edSign } from "node:crypto";
+import { EnvelopeSchema, canonicalJson } from "../contract/envelope.js";
 import {
   canonicalStringify,
   openBody,
@@ -56,9 +57,44 @@ describe("signCanonical / verifyCanonical", () => {
     expect(verifyCanonical(sigAPubPem, obj, sig)).toBe(true);
   });
 
-  it("键序不同但内容相同的对象验签通过（规范化生效）", () => {
-    const sig = signCanonical(sigAPrivPem, { a: 1, b: 2 });
-    expect(verifyCanonical(sigAPubPem, { b: 2, a: 1 }, sig)).toBe(true);
+  it("契约声明序签名必须验过；字典序重排的对象验签失败（键序不参与规范化）", () => {
+    const envelope = EnvelopeSchema.parse({
+      v: 1,
+      id: "msg_01JD2YWBN5GQXJSQ9P7RJ3TBEM",
+      from: "alice@mbp16",
+      to: "bob@pc",
+      subject: "hello",
+      inReplyTo: null,
+      references: [],
+      createdAt: "2026-10-27T09:00:00.000Z",
+      claim: { name: "Alice", email: "alice@example.com" },
+      seal: { alg: "x25519-aes256gcm", epk: "epk", iv: "iv", body: "sealed" },
+      attachments: [],
+      sig: "x",
+    });
+    const { sig: _sig, ...unsigned } = envelope;
+
+    // 按契约序（zod 声明序）签：canonicalJson 字节 = 外部实现的互操作基准
+    const contractBytes = canonicalJson(unsigned);
+    expect(contractBytes).not.toBe(canonicalStringify(unsigned)); // 字典序 ≠ 声明序
+    const sig = edSign(null, Buffer.from(contractBytes), createPrivateKey(sigAPrivPem)).toString("base64");
+    expect(verifyCanonical(sigAPubPem, unsigned, sig)).toBe(true);
+
+    // 字典序重排（内容相同）→ 不验过
+    const reordered = {
+      attachments: unsigned.attachments,
+      claim: unsigned.claim,
+      createdAt: unsigned.createdAt,
+      from: unsigned.from,
+      id: unsigned.id,
+      inReplyTo: unsigned.inReplyTo,
+      references: unsigned.references,
+      seal: unsigned.seal,
+      subject: unsigned.subject,
+      to: unsigned.to,
+      v: unsigned.v,
+    };
+    expect(verifyCanonical(sigAPubPem, reordered, sig)).toBe(false);
   });
 
   it("篡改对象验签失败", () => {

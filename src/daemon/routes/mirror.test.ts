@@ -10,8 +10,9 @@ import { createWorkspace, getWorkspaceRow, WorkspaceHost } from "../../workspace
 import { makeEvent } from "../../workspace/events.js";
 import { acceptInvite, type WorkspaceInvite } from "../../workspace/invite.js";
 import type { MirrorEvent } from "../../contract/api.js";
-import { pairDual, startDual, until, type DualSandbox } from "../e2e-kit.js";
-import type { DaemonHandle } from "../server.js";
+import { pairDual, startDual, startNode, until, fakeMdns, ROUTES_DIR, type DualSandbox } from "../e2e-kit.js";
+import { startDaemon, type DaemonHandle } from "../server.js";
+import mirrorRoutes from "./mirror.js";
 
 const CC_FIXTURE = fileURLToPath(new URL("../../../tests/fixtures/mirror/claude-code", import.meta.url));
 const SESSION_ID = "0b34d286-4903-4d93-be17-128b6b3d653e";
@@ -195,7 +196,7 @@ describe("mirror routes: 双节点显式 attach → 上行 → SSE 扇出", () =
       });
       expect(attachRes.status).toBe(201);
       const attached = (await attachRes.json()) as { attachEventId: string; seq: number };
-      expect(attached.attachEventId).toMatch(/^evt_/);
+      expect(attached.attachEventId).toMatch(/^we_/);
 
       // 事件完整到达（4 条 fixture 存量 → 工作区级 n 连续）
       expect(await until(() => sse.events.length >= 4)).toBe(true);
@@ -306,4 +307,99 @@ describe("mirror routes: 双节点显式 attach → 上行 → SSE 扇出", () =
     },
     20_000,
   );
+});
+
+/** 双节点 + 配对 + 建区 + 邀请 B 入区 */
+async function memberWorkspace(tag: string): Promise<DualSandbox & { wsId: string }> {
+  const sandbox = await startDual(tag);
+  handles.push(sandbox.a, sandbox.b);
+  await pairDual(sandbox);
+  const wsId = createWorkspace(sandbox.a, { name: "Mirror", projectSlug: "mirror" });
+  const invite = (await (
+    await signedFetch(sandbox.a, `/ws/${wsId}/invite`, { method: "POST", body: {} })
+  ).json()) as WorkspaceInvite;
+  await acceptInvite(sandbox.b.dirs, invite);
+  return { ...sandbox, wsId };
+}
+
+describe("mirror routes: 回环专属面与上行归属", () => {
+  it("attachable/attach/detach 为 lan:false；SSE/snapshot/上行保留 LAN", () => {
+    const flags = Object.fromEntries(mirrorRoutes.map((r) => [`${r.method} ${r.path}`, r.lan]));
+    expect(flags["GET /ws/:id/mirror/attachable"]).toBe(false);
+    expect(flags["POST /ws/:id/mirror/attach"]).toBe(false);
+    expect(flags["DELETE /ws/:id/mirror/:sessionId"]).toBe(false);
+    expect(flags["GET /ws/:id/mirror"]).toBe(true);
+    expect(flags["GET /ws/:id/mirror/:sessionId/snapshot"]).toBe(true);
+    expect(flags["POST /ws/:id/mirror/:sessionId/event"]).toBe(true);
+  });
+
+  it("上行归属：非挂载发起者 409 且不落缓冲；detach 后迟到事件 409 且不重建缓冲", async () => {
+    const { a, b, wsId } = await memberWorkspace("amail-mirror-own-");
+
+    // 房主本机挂载 s1（审计事件；测试无需真实适配器）
+    const attach = makeEvent(a.identity.signPrivPem, a.address, "session.attach", {
+      sessionId: "s1",
+      cli: "claude-code",
+      cwd: "/tmp",
+    });
+    const attached = await signedFetch(a, `/ws/${wsId}/events`, { method: "POST", body: attach });
+    expect(attached.status).toBe(201);
+
+    const raw = { t: new Date().toISOString(), sessionId: "s1", text: "injected" };
+    const injected = await signedFetchTo(b, a, `/ws/${wsId}/mirror/s1/event`, {
+      method: "POST",
+      body: raw,
+    });
+    expect(injected.status).toBe(409);
+    expect(((await injected.json()) as { error: string }).error).toBe("not-attached");
+
+    const snap = (await (
+      await signedFetchTo(b, a, `/ws/${wsId}/mirror/s1/snapshot`)
+    ).json()) as { events: unknown[]; hwm: number };
+    expect(snap.events).toEqual([]);
+    expect(snap.hwm).toBe(0);
+
+    // 房主 detach → 迟到上行 409，不得重建缓冲
+    const detach = makeEvent(a.identity.signPrivPem, a.address, "session.detach", {
+      sessionId: "s1",
+      attachEventId: attach.eventId,
+    });
+    expect((await signedFetch(a, `/ws/${wsId}/events`, { method: "POST", body: detach })).status).toBe(201);
+
+    const late = await signedFetchTo(b, a, `/ws/${wsId}/mirror/s1/event`, {
+      method: "POST",
+      body: { ...raw, text: "late" },
+    });
+    expect(late.status).toBe(409);
+    const snapAfter = (await (
+      await signedFetchTo(b, a, `/ws/${wsId}/mirror/s1/snapshot`)
+    ).json()) as { events: unknown[]; hwm: number };
+    expect(snapAfter.events).toEqual([]);
+    expect(snapAfter.hwm).toBe(0);
+  });
+
+  it("房主崩溃重启：启动清理自身幽灵挂载（提交 detach，缓冲不复活）", async () => {
+    const a = await startNode("amail-mirror-ghost-a-", "Alice");
+    handles.push(a);
+    const wsId = createWorkspace(a, { name: "Mirror", projectSlug: "mirror" });
+    const attach = makeEvent(a.identity.signPrivPem, a.address, "session.attach", {
+      sessionId: "s1",
+      cli: "claude-code",
+      cwd: "/tmp",
+    });
+    expect((await signedFetch(a, `/ws/${wsId}/events`, { method: "POST", body: attach })).status).toBe(201);
+    expect(new WorkspaceHost(a, wsId).state().attached.map((x) => x.sessionId)).toEqual(["s1"]);
+
+    const dirs = a.dirs;
+    await a.stop();
+    handles.pop();
+
+    const revived = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
+    handles.push(revived);
+
+    expect(new WorkspaceHost(revived, wsId).state().attached).toEqual([]);
+    const detaches = auditRows(revived, wsId).filter((e) => e.kind === "session.detach");
+    expect(detaches).toHaveLength(1);
+    expect(detaches[0]!.payload).toMatchObject({ sessionId: "s1", attachEventId: attach.eventId });
+  });
 });

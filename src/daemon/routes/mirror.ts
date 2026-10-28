@@ -16,9 +16,11 @@
  */
 import { z } from "zod";
 import { sendJson, type DaemonCore, type Disposer, type Route, type RouteCtx } from "../router.js";
+import { userAddress } from "../server.js";
 import { checkRequestSig } from "./workspace.js";
 import { getWorkspaceRow, WorkspaceHost, type WorkspaceRow } from "../../workspace/host.js";
 import { configureActiveSessions, resetActiveSessions } from "../../workspace/projection-local.js";
+import { makeEvent } from "../../workspace/events.js";
 import { MirrorHub, MirrorSessions, attachSession, detachSession, attachableList, MirrorError } from "../../mirror/hub.js";
 import { claudeCodeAdapter } from "../../mirror/claude-code.js";
 import { piAdapter } from "../../mirror/pi.js";
@@ -165,10 +167,19 @@ function handleSnapshot(ctx: RouteCtx): void {
 function handleUplink(ctx: RouteCtx): void {
   const row = workspaceOr404(ctx);
   if (!row) return;
-  if (!gate(ctx, row)) return;
+  const actor = gate(ctx, row);
+  if (!actor) return;
   const parsed = RawMirrorEventSchema.safeParse(ctx.body);
   if (!parsed.success || parsed.data.sessionId !== ctx.params.sessionId) {
     sendJson(ctx.res, 400, { error: "invalid-event" });
+    return;
+  }
+  // 上行归属：仅挂载发起者可上行；detach 后（投影无该挂载）迟到事件 409 且不重建缓冲
+  const attached = new WorkspaceHost(ctx, row.id)
+    .state()
+    .attached.find((a) => a.sessionId === parsed.data.sessionId);
+  if (!attached || attached.actor !== actor) {
+    sendJson(ctx.res, 409, { error: "not-attached" });
     return;
   }
   const { hub } = stateOf(ctx);
@@ -187,9 +198,10 @@ function handleAttachable(ctx: RouteCtx): void {
 
 const routes: Route[] = [
   { method: "GET", path: "/ws/:id/mirror", lan: true, handler: handleSse },
-  { method: "GET", path: "/ws/:id/mirror/attachable", lan: true, handler: handleAttachable },
-  { method: "POST", path: "/ws/:id/mirror/attach", lan: true, handler: handleAttach },
-  { method: "DELETE", path: "/ws/:id/mirror/:sessionId", lan: true, handler: handleDetach },
+  // attachable/attach/detach 是「让本机以其本机身份采集/断采」——仅本机可调
+  { method: "GET", path: "/ws/:id/mirror/attachable", lan: false, handler: handleAttachable },
+  { method: "POST", path: "/ws/:id/mirror/attach", lan: false, handler: handleAttach },
+  { method: "DELETE", path: "/ws/:id/mirror/:sessionId", lan: false, handler: handleDetach },
   { method: "GET", path: "/ws/:id/mirror/:sessionId/snapshot", lan: true, handler: handleSnapshot },
   { method: "POST", path: "/ws/:id/mirror/:sessionId/event", lan: true, handler: handleUplink },
 ];
@@ -197,14 +209,40 @@ const routes: Route[] = [
 export default routes;
 
 /**
+ * 房主重启清理：本机为房主的 workspaces 中 actor=本机 的 attached 残留——
+ * 内存挂载已随进程消失、无法采集，启动即提交 detach（携来源 attachEventId）。
+ */
+function cleanupLocalGhostMounts(core: DaemonCore): void {
+  const addr = userAddress(core.dirs, core.identity);
+  const rows = core.db
+    .prepare("SELECT * FROM workspaces WHERE host_addr = ?")
+    .all(addr) as unknown as WorkspaceRow[];
+  for (const row of rows) {
+    const host = new WorkspaceHost(core, row.id);
+    for (const att of host.state().attached) {
+      if (att.actor !== addr) continue;
+      const detach = makeEvent(core.identity.signPrivPem, addr, "session.detach", {
+        sessionId: att.sessionId,
+        attachEventId: att.attachEventId,
+      });
+      try {
+        host.submit(detach);
+      } catch {
+        // 清理尽力而为：残留下次启动再试
+      }
+    }
+  }
+}
+
+/**
  * daemon 启动：注入活跃采集流探针（P6 幽灵清理用——否则成员每次补拉会对自己的
- * 挂载产生噪音 detach）；房主重启天然清空全部内存缓冲（镜像数据可 re-attach 重取）。
- * 幽灵清理三触发点中的 daemon 启动扫描由 P6 同步任务恢复（ensureSync 首次成功补拉后
- * ghostCleanup）承接，本路由无需重复编排。
+ * 挂载产生噪音 detach）；房主重启天然清空全部内存缓冲（镜像数据可 re-attach 重取），
+ * 故启动即清理本机为房主的幽灵挂载。成员机同步任务的首次补拉清理由 P6 ghostCleanup 承接。
  */
 export async function init(core: DaemonCore): Promise<Disposer> {
   const state = stateOf(core);
   configureActiveSessions(() => state.sessions.activeSessionIds());
+  cleanupLocalGhostMounts(core);
   return () => {
     // 连接断开自动 detach：停机时按各活跃挂载的 attachEventId best-effort 提交 detach
     const mounts = state.sessions.stopAll();

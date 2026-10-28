@@ -76,13 +76,6 @@ export async function acceptInvite(dirs: Dirs, invite: WorkspaceInvite): Promise
     throw new Error("invite signature check failed");
   }
 
-  // 本地登记 workspace（幂等）
-  db.prepare(
-    `INSERT INTO workspaces (id, name, project_slug, host_addr, created_at)
-     VALUES (?, ?, '', ?, ?)
-     ON CONFLICT(id) DO NOTHING`,
-  ).run(invite.workspaceId, invite.name, invite.hostAddr, new Date().toISOString());
-
   // join：房主验双重签名 + 已配对 → 房主构造并签署 membership add 定序
   const actor = userAddress(dirs, identity);
   const base = await resolveHostBase(db, invite.hostAddr);
@@ -104,6 +97,17 @@ export async function acceptInvite(dirs: Dirs, invite: WorkspaceInvite): Promise
   });
 
   const out = (await res.json().catch(() => ({}))) as { seq?: number; alreadyMember?: boolean; error?: string };
+  // 先校验房主受理（失败不留本地记录、不启动同步）
+  if (!res.ok) {
+    throw new Error(`join rejected by host ${invite.hostAddr}: ${res.status} ${out.error ?? ""}`.trim());
+  }
+
+  // 本地登记 workspace（幂等；只在房主确认准入后落本地）
+  db.prepare(
+    `INSERT INTO workspaces (id, name, project_slug, host_addr, created_at)
+     VALUES (?, ?, '', ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  ).run(invite.workspaceId, invite.name, invite.hostAddr, new Date().toISOString());
 
   // 回环触发 daemon 内 ensureSync（幂等；daemon 运行中入区无需重启）
   await apiFetch(dirs, `/v1/ws-sync/${invite.workspaceId}`, { method: "POST" }).catch(() => {

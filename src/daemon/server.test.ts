@@ -1,5 +1,6 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,11 +8,14 @@ import { describe, expect, it, afterEach } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ulid } from "ulid";
 import { resolveDirs } from "../core/paths.js";
+import { openStore } from "../core/db.js";
 import { loadOrCreateIdentity } from "../core/identity.js";
 import { saveInbound } from "../core/store.js";
 import { AliveInfoSchema } from "../contract/api.js";
 import { EnvelopeSchema, type Envelope } from "../contract/envelope.js";
 import { DaemonAlreadyRunningError, startDaemon, type DaemonHandle } from "./server.js";
+import { fakeMdns } from "./e2e-kit.js";
+import type { AdvertiseService } from "./mdns.js";
 
 const ROUTES_DIR = fileURLToPath(new URL("./routes", import.meta.url));
 
@@ -25,9 +29,22 @@ afterEach(async () => {
 
 async function start() {
   const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-server-")) });
-  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR });
+  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
   handles.push(handle);
   return handle;
+}
+
+/** 取一个当前空闲的本地端口（listen 0 后立即释放） */
+function freePort(): Promise<number> {
+  const { promise, resolve, reject } = Promise.withResolvers<number>();
+  const srv = createServer();
+  srv.once("error", reject);
+  srv.listen(0, "127.0.0.1", () => {
+    const address = srv.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    srv.close(() => resolve(port));
+  });
+  return promise;
 }
 
 function inbound(db: DaemonHandle["db"], subject: string) {
@@ -135,9 +152,65 @@ describe("daemon start/stop", () => {
     const dirs = handle.dirs;
     await handle.stop();
     handles.pop();
-    const again = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR });
+    const again = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
     handles.push(again);
     expect((await fetch(`http://127.0.0.1:${again.port}/alive`)).status).toBe(200);
+  });
+
+  it("监听成功后按实际端口广播 mDNS（TXT 指纹=本机 deviceId），stop 撤销", async () => {
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-mdns-wire-")) });
+    const services: AdvertiseService[] = [];
+    let ended = false;
+    const handle = await startDaemon({
+      port: 0,
+      dirs,
+      routesDir: ROUTES_DIR,
+      mdns: {
+        advertiseImpl: async (service) => {
+          services.push(service);
+          return { end: async () => void (ended = true) };
+        },
+      },
+    });
+    handles.push(handle);
+
+    expect(services).toHaveLength(1);
+    expect(services[0]!.port).toBe(handle.port);
+    expect(services[0]!.txt.fp).toBe(handle.identity.deviceId);
+    expect(services[0]!.name).toBe(`amail-${handle.identity.deviceId}`);
+
+    await handle.stop();
+    handles.pop();
+    expect(ended).toBe(true);
+  });
+
+  it("缺省端口读 config.port（--port 未给时）", async () => {
+    const port = await freePort();
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-cfgport-")) });
+    writeFileSync(
+      join(dirs.configDir, "config.json"),
+      JSON.stringify({ version: 1, name: "Alice", email: "a@example.com", port, notify: false }),
+      "utf8",
+    );
+    const handle = await startDaemon({ dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
+    handles.push(handle);
+    expect(handle.port).toBe(port);
+  });
+
+  it("监听失败（EADDRINUSE）reject 并清理 pid/DB，不报成功", async () => {
+    const first = await start();
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-inuse-")) });
+    const err = await startDaemon({
+      port: first.port,
+      dirs,
+      routesDir: ROUTES_DIR,
+      mdns: fakeMdns,
+    }).catch((e: unknown) => e);
+    expect((err as NodeJS.ErrnoException).code).toBe("EADDRINUSE");
+    expect(existsSync(join(dirs.dataDir, "daemon.pid"))).toBe(false);
+    // DB 已关闭：可重新打开
+    const db = openStore(dirs.storePath);
+    db.close();
   });
 });
 

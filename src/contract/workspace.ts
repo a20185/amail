@@ -2,7 +2,7 @@ import { z } from "zod";
 import { AddressSchema } from "./address.js";
 import { ArtifactMetaSchema } from "./attachment.js";
 
-const EventId = z.string().regex(/^evt_[0-9A-HJKMNP-TV-Z]{26}$/);
+const EventId = z.string().regex(/^we_[0-9A-HJKMNP-TV-Z]{26}$/);
 
 export const ActionPayloadSchema = z.object({
   who: AddressSchema,

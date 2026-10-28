@@ -53,6 +53,18 @@ async function handleDeliver(ctx: RouteCtx): Promise<void> {
     return;
   }
 
+  // parts 与 envelope.attachments 一一对应：缺失/多余即 422。
+  // 必须在幂等去重之前判定，否则「先 200 后幂等吞掉补投」会掩盖不完整载荷。
+  const declaredIds = envelope.attachments.map((a) => a.id).sort();
+  const partIds = parts.map((p) => p.id).sort();
+  if (
+    declaredIds.length !== partIds.length ||
+    declaredIds.some((id, i) => id !== partIds[i])
+  ) {
+    sendJson(res, 422, { error: "parts-mismatch", id: envelope.id });
+    return;
+  }
+
   // id 去重：同 id 幂等 200
   if (getMessage(db, envelope.id)) {
     sendJson(res, 200, { deliveredAt: new Date().toISOString(), idempotent: true });
@@ -82,6 +94,16 @@ async function handleDeliver(ctx: RouteCtx): Promise<void> {
     sealed = SealedBodySchema.parse(JSON.parse(sealedRaw.toString("utf8")));
   } catch {
     sendJson(res, 422, { error: "bad-seal", id: envelope.id });
+    return;
+  }
+
+  // 密封体 attachmentIds 须与信封声明一一对应（在逐 part 落盘之前判定）
+  const sealedIds = [...sealed.attachmentIds].sort();
+  if (
+    sealedIds.length !== declaredIds.length ||
+    sealedIds.some((id, i) => id !== declaredIds[i])
+  ) {
+    sendJson(res, 422, { error: "parts-mismatch", id: envelope.id });
     return;
   }
 

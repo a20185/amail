@@ -6,10 +6,14 @@ import { resolveDirs } from "../core/paths.js";
 import { expect } from "vitest";
 import { configureDelivery } from "../core/delivery.js";
 import { startDaemon, type DaemonHandle } from "./server.js";
+import type { MdnsDeps } from "./mdns.js";
 import type { PairConfirmSig } from "../contract/pair.js";
 
 /** 路由目录 = 本模块兄弟（进程内真路由发现，不依赖构建产物） */
 export const ROUTES_DIR = fileURLToPath(new URL("./routes", import.meta.url));
+
+/** fake mDNS 广播：测试不发真组播（assert 广播接线时注入自定义实现） */
+export const fakeMdns: MdnsDeps = { advertiseImpl: async () => ({ end: async () => {} }) };
 
 /** 测试内禁用真实桌面通知（AMAIL_NOTIFY_CMD 覆盖） */
 process.env.AMAIL_NOTIFY_CMD ||= ":";
@@ -51,7 +55,7 @@ export async function startNode(tag: string, name: string): Promise<DaemonHandle
       "utf8",
     );
   write(0);
-  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR });
+  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
   write(handle.port);
   return handle;
 }

@@ -13,6 +13,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import type { Seal } from "../contract/envelope.js";
+import { canonicalJson } from "../contract/envelope.js";
 
 const HKDF_INFO = "amail/x25519-aes256gcm";
 const IV_LEN = 12;
@@ -102,16 +103,19 @@ export function openBody(encPrivPem: string, seal: Seal): Buffer {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
-/** Ed25519 签名（对规范 JSON 字节） */
+/**
+ * Ed25519 签名（对契约规范 JSON 字节：键序 = zod 声明序，调用方须传 zod 解析后的对象
+ * 或按声明序构造的显式字段表）。字典序不参与签名。
+ */
 export function signCanonical(privPem: string, obj: unknown): string {
   const priv = createPrivateKey(privPem);
-  return cryptoSign(null, Buffer.from(canonicalStringify(obj)), priv).toString("base64");
+  return cryptoSign(null, Buffer.from(canonicalJson(obj)), priv).toString("base64");
 }
 
 export function verifyCanonical(pubPem: string, obj: unknown, sig: string): boolean {
   try {
     const pub = createPublicKey(pubPem);
-    return cryptoVerify(null, Buffer.from(canonicalStringify(obj)), pub, Buffer.from(sig, "base64"));
+    return cryptoVerify(null, Buffer.from(canonicalJson(obj)), pub, Buffer.from(sig, "base64"));
   } catch {
     return false;
   }

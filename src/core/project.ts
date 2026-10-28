@@ -58,6 +58,19 @@ interface AttachmentRow {
   sha256: string;
 }
 
+/**
+ * 附件归档落盘名：原名仅取 basename，含路径分隔符/上溯段的名字整体拒绝
+ * （不复制），哈希前缀防同名覆盖；原名只保留在正文元数据里。
+ */
+function archiveBlobName(att: AttachmentRow): string | undefined {
+  const raw = att.name;
+  if (!raw || raw.includes("/") || raw.includes("\\") || raw.includes("..")) return undefined;
+  const base = basename(raw);
+  if (!base || base === "." || base === "..") return undefined;
+  const prefix = att.sha256.slice(0, 8).replace(/[^0-9a-f]/g, "") || "blob";
+  return `${prefix}-${base}`;
+}
+
 function renderMarkdown(row: MessageRow, attachments: AttachmentRow[], attDir: string): string {
   const lines: string[] = [];
   lines.push(`# ${row.subject}`, "");
@@ -73,7 +86,9 @@ function renderMarkdown(row: MessageRow, attachments: AttachmentRow[], attDir: s
   if (attachments.length) {
     lines.push("## 附件", "");
     for (const att of attachments) {
-      lines.push(`- ${att.name} (${att.size}B, sha256=${att.sha256}) → ${join(attDir, att.name)}`);
+      const stored = archiveBlobName(att);
+      const target = stored ? join(attDir, stored) : "(未导出：非法文件名)";
+      lines.push(`- ${att.name} (${att.size}B, sha256=${att.sha256}) → ${target}`);
     }
     lines.push("");
   }
@@ -101,8 +116,9 @@ export function exportArchive(dirs: Dirs, db: DatabaseSync, messageId: string, s
   const attDir = join(archiveDir, "attachments", messageId);
   mkdirSync(attDir, { recursive: true });
   for (const att of attachments) {
-    if (att.blob_path && existsSync(att.blob_path)) {
-      copyFileSync(att.blob_path, join(attDir, att.name));
+    const stored = archiveBlobName(att);
+    if (stored && att.blob_path && existsSync(att.blob_path)) {
+      copyFileSync(att.blob_path, join(attDir, stored));
     }
   }
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sandboxEnv, startStub } from "../testkit.js";
 import { apiFetch } from "../../cli/util.js";
 import { configureDelivery, resetDeliveryConfig } from "../../core/delivery.js";
@@ -132,6 +132,77 @@ describe("amail pair / unpair", () => {
     const statusB = (await apiFetch(dirsB, `/v1/pair/status/${offerNonce}`)) as { sas: string };
     expect(statusB.sas).toBe(status.sas);
   });
+
+  it("两步流程：第一次显示 SAS，第二次 --confirm 复用原 nonce（不新建 offer）", async () => {
+    const homeA = sandboxEnv();
+    const homeB = sandboxEnv();
+    const stubA = await startStub(homeA.home);
+    const stubB = await startStub(homeB.home);
+    stubs.push(stubA.handle, stubB.handle);
+    refreshMdns(stubA.handle, stubB.handle);
+    const dirsA = resolveDirs(homeA.env);
+    const dirsB = resolveDirs(homeB.env);
+    const addrA = userAddress(stubA.handle.dirs, stubA.handle.identity);
+
+    // A 发起 offer 并转发给 B（模拟 A 侧发起阶段）
+    const { offer } = (await apiFetch(dirsA, "/v1/pair/local-offer", { method: "POST" })) as {
+      offer: PairOffer;
+    };
+    const forwarded = await fetch(`http://127.0.0.1:${stubB.handle.port}/v1/pair/offer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(offer),
+    });
+    expect(forwarded.status).toBe(200);
+
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    });
+    try {
+      // 第一次（不带 --confirm）：应答模式 → 显示 SAS，等待人工比对
+      const first = await runPair(addrA, {
+        host: "127.0.0.1",
+        port: stubA.handle.port,
+        env: homeB.env,
+      });
+      expect(first.sas).toMatch(/^\d{6}$/);
+      expect(logged.some((line) => line.includes("SAS:"))).toBe(true);
+
+      // 会话已 answer 未 confirm → 仍在 pending（--confirm 可复用原 nonce）
+      const pending = (await apiFetch(dirsB, "/v1/pair/pending")) as Array<{ offerNonce: string }>;
+      expect(pending.map((p) => p.offerNonce)).toContain(offer.nonce);
+
+      // 第二次（--confirm）：复用原 nonce，不新建 offer
+      const second = runPair(addrA, {
+        host: "127.0.0.1",
+        port: stubA.handle.port,
+        confirm: true,
+        env: homeB.env,
+      });
+      // A 侧确认并转发，凑齐双签
+      const { confirm } = (await apiFetch(dirsA, `/v1/pair/local-confirm/${offer.nonce}`, {
+        method: "POST",
+      })) as { confirm: PairConfirmSig };
+      const confirmed = await fetch(
+        `http://127.0.0.1:${stubB.handle.port}/v1/pair/confirm/${offer.nonce}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(confirm),
+        },
+      );
+      expect([200, 202]).toContain(confirmed.status);
+
+      const status = await second;
+      expect(status.stage).toBe("confirmed");
+      // 原 nonce 在 A 侧同样推进到 confirmed（新 offer 不会推进原会话）
+      const statusA = (await apiFetch(dirsA, `/v1/pair/status/${offer.nonce}`)) as { stage: string };
+      expect(statusA.stage).toBe("confirmed");
+    } finally {
+      spy.mockRestore();
+    }
+  }, 15_000);
 
   it("缺 --host/--port → 报错", async () => {
     const { home, env } = sandboxEnv();

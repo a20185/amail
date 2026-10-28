@@ -30,22 +30,38 @@ export function deviceVerifyMessage(pubPem: string, message: string, sigB64: str
   }
 }
 
-/** 签名消息：method + path（不含 query） + sha256(bodyText)；GET/无 body 用空串 */
-export function requestSigMessage(method: string, pathname: string, bodyText: string): string {
-  return `${method}${pathname}${sha256Hex(bodyText)}`;
+/**
+ * 签名消息：method + path（不含 query） + sha256(body) hex + X-Amail-Date。
+ * Date 入签名，改动时间头即验签失败（±10min 窗另判）。
+ */
+export function requestSigMessage(
+  method: string,
+  pathname: string,
+  bodySha256: string,
+  date: string,
+): string {
+  return `${method}${pathname}${bodySha256}${date}`;
 }
 
-/** 生成签名请求头（body 须与实际发送字节一致：POST 用 canonicalStringify） */
+/**
+ * 生成签名请求头（body 须与实际发送字节一致：JSON 用 canonicalStringify；
+ * 原始字节体（如 artifact 上传）用 bodySha256 直接传实际字节的 sha256 hex）
+ */
 export function amailSigHeaders(
   privPem: string,
   method: string,
   pathname: string,
   bodyText: string,
   actor?: string,
+  bodySha256?: string,
 ): Record<string, string> {
+  const date = new Date().toISOString();
   const headers: Record<string, string> = {
-    "X-Amail-Sig": deviceSignMessage(privPem, requestSigMessage(method, pathname, bodyText)),
-    "X-Amail-Date": new Date().toISOString(),
+    "X-Amail-Sig": deviceSignMessage(
+      privPem,
+      requestSigMessage(method, pathname, bodySha256 ?? sha256Hex(bodyText), date),
+    ),
+    "X-Amail-Date": date,
   };
   if (actor) headers["X-Amail-Actor"] = actor;
   return headers;

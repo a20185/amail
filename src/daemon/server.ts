@@ -7,6 +7,8 @@ import { openStore } from "../core/db.js";
 import { loadOrCreateIdentity, type DeviceIdentityFull } from "../core/identity.js";
 import { resolveDirs, type Dirs } from "../core/paths.js";
 import { EventBus } from "./sse.js";
+import type { AdvertiseHandle, MdnsDeps } from "./mdns.js";
+import { advertise } from "./mdns.js";
 import {
   defaultRoutesDir,
   isLoopbackAddress,
@@ -28,6 +30,8 @@ const MAX_BODY_BYTES = 64 * 1024 * 1024;
 export interface UserConfig {
   name: string;
   email: string;
+  /** 客户端与 daemon 共用的监听端口（缺省 36969） */
+  port: number;
 }
 
 export function loadUserConfig(dirs: Dirs): UserConfig {
@@ -37,18 +41,34 @@ export function loadUserConfig(dirs: Dirs): UserConfig {
     return {
       name: typeof raw.name === "string" && raw.name ? raw.name : "user",
       email: typeof raw.email === "string" && raw.email ? raw.email : "user@example.com",
+      port:
+        typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0
+          ? raw.port
+          : DEFAULT_PORT,
     };
   }
-  return { name: "user", email: "user@example.com" };
+  return { name: "user", email: "user@example.com", port: DEFAULT_PORT };
+}
+
+/**
+ * 地址用户名段归一（setup 展示与 daemon 实际地址共用同一规则）：
+ * 小写 → 空格换连字符 → 仅保留 [a-z0-9-] → 空回退 user。
+ */
+export function normalizeUser(value: string): string {
+  const cleaned = value
+    .toLowerCase()
+    .replaceAll(" ", "-")
+    .replace(/[^a-z0-9-]+/g, "");
+  return cleaned || "user";
 }
 
 function addressSegment(value: string): string {
   return value.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "user";
 }
 
-/** 地址 = 人名@设备名（人名来自 config.json） */
+/** 地址 = 人名@设备名（人名来自 config.json，规则与 setup 展示一致） */
 export function userAddress(dirs: Dirs, identity: Pick<DeviceIdentityFull, "deviceName">): string {
-  return `${addressSegment(loadUserConfig(dirs).name)}@${addressSegment(identity.deviceName)}`;
+  return `${normalizeUser(loadUserConfig(dirs).name)}@${addressSegment(identity.deviceName)}`;
 }
 
 /** 已有守护进程占用 pid 锁（进程退出码 3） */
@@ -188,6 +208,8 @@ export interface StartDaemonOptions {
   dirs?: Dirs;
   /** 路由发现目录（测试注入 src/daemon/routes，不依赖构建产物） */
   routesDir?: string;
+  /** mDNS 广播注入（测试用 fake；缺省真发组播） */
+  mdns?: MdnsDeps;
 }
 
 export interface DaemonHandle extends DaemonCore {
@@ -205,7 +227,7 @@ export interface DaemonHandle extends DaemonCore {
  */
 export async function startDaemon(options: StartDaemonOptions = {}): Promise<DaemonHandle> {
   const dirs = options.dirs ?? resolveDirs();
-  const port = options.port ?? DEFAULT_PORT;
+  const port = options.port ?? loadUserConfig(dirs).port;
 
   const pidPath = join(dirs.dataDir, "daemon.pid");
   if (existsSync(pidPath)) {
@@ -232,16 +254,48 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     void handler(req, res);
   });
 
-  const { promise: listening, resolve: onListening } = Promise.withResolvers<void>();
-  server.once("error", onListening);
-  server.listen(port, "::", onListening);
-  await listening;
-  server.removeListener("error", onListening);
+  const { promise: listening, resolve: onListening, reject: onListenError } =
+    Promise.withResolvers<void>();
+  const onError = (err: Error) => onListenError(err);
+  server.once("error", onError);
+  server.listen(port, "::", () => onListening());
+  try {
+    await listening;
+  } catch (err) {
+    // 监听失败（如 EADDRINUSE）：清理已占用的资源后上抛，不得报成功
+    for (const disposer of disposers.reverse()) {
+      try {
+        await disposer();
+      } catch {
+        // 清理尽力而为
+      }
+    }
+    core.bus.closeAll();
+    db.close();
+    if (existsSync(pidPath)) rmSync(pidPath);
+    throw err;
+  } finally {
+    server.removeListener("error", onError);
+  }
 
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
 
+  // mDNS 广播实际端口（发现不依赖固定口）；广播失败不阻断守护进程
+  let advertisement: AdvertiseHandle | undefined;
+  try {
+    advertisement = await advertise(dirs, actualPort, options.mdns);
+  } catch (err) {
+    console.error(`[amail] mDNS advertise failed: ${(err as Error).message}`);
+  }
+
   const stop = async (): Promise<void> => {
+    try {
+      await advertisement?.end();
+    } catch {
+      // 撤销广播失败不阻断停机
+    }
+    advertisement = undefined;
     for (const disposer of disposers.reverse()) {
       try {
         await disposer();

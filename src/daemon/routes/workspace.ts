@@ -1,7 +1,7 @@
 import type { Route, RouteCtx, DaemonCore, Disposer } from "../router.js";
 import { isLoopbackAddress, sendJson } from "../router.js";
 import { z } from "zod";
-import { canonicalStringify } from "../../core/crypto.js";
+import { canonicalStringify, sha256Hex } from "../../core/crypto.js";
 import { getPeerByAddress } from "../../core/peer.js";
 import { userAddress } from "../server.js";
 import { WorkspaceHost, WorkspaceSubmitError, getWorkspaceRow, type WorkspaceRow } from "../../workspace/host.js";
@@ -44,9 +44,15 @@ function sendSigError(ctx: RouteCtx, status: number): void {
  * X-Amail-Sig 双分支验签：
  * - 回环来源：本机 identity 公钥 + 成员表（房主恒为成员，不走 peers）
  * - LAN 来源：验签 + 该设备 ∈ peers 已配对 + ∈ 成员表
- * 无签名/伪造 401，非成员 403。
+ * 签名输入 = method + path + sha256(body) + X-Amail-Date。
+ * 无签名/伪造 401，非成员 403。bodySha256 用于 raw 体路由（原始字节哈希）。
  */
-export function checkRequestSig(ctx: RouteCtx, members: string[], hostAddr: string): SigGateResult {
+export function checkRequestSig(
+  ctx: RouteCtx,
+  members: string[],
+  hostAddr: string,
+  bodySha256?: string,
+): SigGateResult {
   const sig = header(ctx, "X-Amail-Sig");
   const date = header(ctx, "X-Amail-Date");
   if (!sig || !date) return { ok: false, status: 401 };
@@ -56,8 +62,8 @@ export function checkRequestSig(ctx: RouteCtx, members: string[], hostAddr: stri
   }
 
   const pathname = (ctx.req.url ?? "/").split("?")[0]!;
-  const bodyText = ctx.body === undefined ? "" : canonicalStringify(ctx.body);
-  const message = requestSigMessage(ctx.req.method ?? "GET", pathname, bodyText);
+  const digest = bodySha256 ?? sha256Hex(ctx.body === undefined ? "" : canonicalStringify(ctx.body));
+  const message = requestSigMessage(ctx.req.method ?? "GET", pathname, digest, date);
 
   const loopback = isLoopbackAddress(ctx.req.socket?.remoteAddress);
   const headerActor = header(ctx, "X-Amail-Actor");
@@ -92,18 +98,29 @@ function workspaceOr404(ctx: RouteCtx): WorkspaceRow | undefined {
   return row;
 }
 
-/** 提交通用入口：artifact 拒绝门（上传走 P8 专用端点） */
+/** 提交通用入口：仅房主本机可写（成员写走房主 URL）；artifact/membership 拒绝门 */
 function handleEventsPost(ctx: RouteCtx): void {
   const row = workspaceOr404(ctx);
   if (!row) return;
+  // 权威写入只属于房主：成员 daemon 接受写入会造成分叉
+  if (row.host_addr !== userAddress(ctx.dirs, ctx.identity)) {
+    sendJson(ctx.res, 409, { error: "not-host" });
+    return;
+  }
   const host = new WorkspaceHost(ctx, row.id);
   const gate = checkRequestSig(ctx, host.state().members, host.hostAddr);
   if (!gate.ok) {
     sendSigError(ctx, gate.status ?? 401);
     return;
   }
-  if (bodyField(ctx, "kind") === "artifact") {
+  const kind = bodyField(ctx, "kind");
+  if (kind === "artifact") {
     sendJson(ctx.res, 422, { error: "use-upload-endpoint" });
+    return;
+  }
+  // membership 变更只经 invite/join 流程（房主代签）；通用入口一律拒绝
+  if (kind === "membership") {
+    sendJson(ctx.res, 422, { error: "use-invite-flow" });
     return;
   }
   try {
@@ -228,8 +245,8 @@ function handleJoinPost(ctx: RouteCtx): void {
     return;
   }
   const pathname = (ctx.req.url ?? "/").split("?")[0]!;
-  const bodyText = ctx.body === undefined ? "" : canonicalStringify(ctx.body);
-  const message = requestSigMessage("POST", pathname, bodyText);
+  const bodySha256 = sha256Hex(ctx.body === undefined ? "" : canonicalStringify(ctx.body));
+  const message = requestSigMessage("POST", pathname, bodySha256, date);
   if (!deviceVerifyMessage(peer.signPubKeyPem, message, sig)) {
     sendJson(ctx.res, 401, { error: "unauthorized" });
     return;

@@ -7,6 +7,7 @@ import { resolveDirs, type Dirs } from "../../core/paths.js";
 import { openStore } from "../../core/db.js";
 import { sha256Hex } from "../../core/crypto.js";
 import { startDaemon, type DaemonHandle } from "../../daemon/server.js";
+import { fakeMdns } from "../../daemon/e2e-kit.js";
 import { runWsCreate } from "./ws.js";
 import { mimeFor, runArtifactFetch, runArtifactList, runArtifactSubmit } from "./artifact.js";
 
@@ -25,7 +26,7 @@ async function sandbox(tag: string): Promise<{ dirs: Dirs; env: NodeJS.ProcessEn
     JSON.stringify({ name: "Proj", repos: [home], archiveDir: join(home, "archive") }),
     "utf8",
   );
-  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR });
+  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
   handles.push(handle);
   writeFileSync(
     join(dirs.configDir, "config.json"),

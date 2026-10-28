@@ -110,13 +110,13 @@ describe("WorkspaceHost", () => {
       .prepare("INSERT INTO workspace_events (workspace_id, seq, source, event_json) VALUES (?, 2, 'local', ?)")
       .run(id, canonicalStringify({
         seq: 2,
-        eventId: "evt_01HGV2KP5Z4W7R8X9Y0ZABCD1F",
+        eventId: "we_01HGV2KP5Z4W7R8X9Y0ZABCD1F",
         actor: host.hostAddr,
         kind: "membership",
         payload: { op: "add", member: "bob@pc" },
         at: new Date().toISOString(),
         sig: signCanonical(core.identity.signPrivPem, eventSigningPayload({
-          eventId: "evt_01HGV2KP5Z4W7R8X9Y0ZABCD1F",
+          eventId: "we_01HGV2KP5Z4W7R8X9Y0ZABCD1F",
           actor: host.hostAddr,
           kind: "membership" as const,
           payload: { op: "add" as const, member: "bob@pc" },

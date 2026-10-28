@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { openStore } from "../../core/db.js";
 import { listInbox } from "../../core/store.js";
 import { startDaemon, userAddress, type DaemonHandle } from "../../daemon/server.js";
+import { fakeMdns } from "../../daemon/e2e-kit.js";
 import {
   runWsAccept,
   runWsAction,
@@ -40,7 +41,7 @@ function sandbox(tag: string): { dirs: Dirs; env: NodeJS.ProcessEnv } {
 }
 
 async function withDaemon(dirs: Dirs): Promise<DaemonHandle> {
-  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR });
+  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
   handles.push(handle);
   writeFileSync(
     join(dirs.configDir, "config.json"),

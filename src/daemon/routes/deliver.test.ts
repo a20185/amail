@@ -2,12 +2,12 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { baseUrl, pairDual, postJson, refreshMdns, startDual, until, ROUTES_DIR } from "../e2e-kit.js";
+import { baseUrl, fakeMdns, pairDual, postJson, refreshMdns, startDual, until, ROUTES_DIR } from "../e2e-kit.js";
 import { startDaemon, type DaemonHandle } from "../server.js";
 import { resetDeliveryConfig, scanOutbox } from "../../core/delivery.js";
 import { get as getMessage } from "../../core/store.js";
 import { buildDeliverReq } from "../../cli/testkit.js";
-import { sha256Hex } from "../../core/crypto.js";
+import { sealBody, sha256Hex, signCanonical } from "../../core/crypto.js";
 
 const handles: DaemonHandle[] = [];
 
@@ -123,6 +123,49 @@ describe("e2e LAN 直投（双 daemon + fake mdns）", () => {
     expect(getMessage(b.db, req.envelope.id)).toBeUndefined();
   });
 
+  it("parts 缺项 → 422（去重前判定）；补全后重投不被幂等吞掉", async () => {
+    const { a, b, addrA, addrB } = await dual("parts");
+    const req = buildDeliverReq(a.identity, b.identity, {
+      fromAddr: addrA,
+      toAddr: addrB,
+      attachments: [
+        { id: "att_01M61CHRC25BCYH10EHVCHSPRE", name: "a.bin", bytes: Buffer.from("aaaa") },
+        { id: "att_01M61CHRC25BCYH10EHVCHSPRF", name: "b.bin", bytes: Buffer.from("bbbb") },
+      ],
+    });
+
+    const incomplete = { ...req, parts: req.parts.slice(0, 1) };
+    const missing = await postJson<{ error: string }>(baseUrl(b), "/v1/deliver", incomplete);
+    expect(missing.status).toBe(422);
+    expect(missing.json.error).toBe("parts-mismatch");
+    expect(getMessage(b.db, req.envelope.id)).toBeUndefined();
+
+    // 完整载荷补投：不得因先前失败留下的幂等记录而 200 掉
+    const full = await postJson(baseUrl(b), "/v1/deliver", req);
+    expect(full.status).toBe(200);
+    expect(getMessage(b.db, req.envelope.id)?.id).toBe(req.envelope.id);
+  });
+
+  it("密封体 attachmentIds 与信封不一致 → 422 且不落库", async () => {
+    const { a, b, addrA, addrB } = await dual("sealed-ids");
+    const req = buildDeliverReq(a.identity, b.identity, {
+      fromAddr: addrA,
+      toAddr: addrB,
+      attachments: [{ id: "att_01M61CHRC25BCYH10EHVCHSPRE", name: "a.bin", bytes: Buffer.from("aaaa") }],
+    });
+
+    const { sig: _sig, ...unsigned } = req.envelope;
+    const resealed = { ...unsigned, seal: sealBody(b.identity.encPubPem, Buffer.from(JSON.stringify({ body: "e2e body", attachmentIds: [] }))) };
+    const forged = {
+      ...req,
+      envelope: { ...resealed, sig: signCanonical(a.identity.signPrivPem, resealed) },
+    };
+    const res = await postJson<{ error: string }>(baseUrl(b), "/v1/deliver", forged);
+    expect(res.status).toBe(422);
+    expect(res.json.error).toBe("parts-mismatch");
+    expect(getMessage(b.db, forged.envelope.id)).toBeUndefined();
+  });
+
   it("重放（同 id 二投）幂等 200，B 只落一条", async () => {
     const { a, b, addrA, addrB } = await dual("replay");
     const req = buildDeliverReq(a.identity, b.identity, { fromAddr: addrA, toAddr: addrB });
@@ -206,7 +249,7 @@ describe("e2e LAN 直投（双 daemon + fake mdns）", () => {
     ).toBe(true);
 
     // B 恢复（新随机端口）→ fake mdns 刷新 → 扫描重试
-    const revived = await startDaemon({ port: 0, dirs: bDirs, routesDir: ROUTES_DIR });
+    const revived = await startDaemon({ port: 0, dirs: bDirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
     handles.push(revived);
     refreshMdns(a, revived);
     // 模拟退避到期（30s 扫描周期触发点）

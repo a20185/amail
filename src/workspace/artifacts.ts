@@ -112,13 +112,15 @@ function parseArtifactEvent(signedEvent: unknown): SubmitEvent & { kind: "artifa
 
 /**
  * 接收一次工件上传：验事件签名 → 流式落临时文件（实际字节数/哈希双校验）
- * → 单事务（blob 落位 + submit 定序）→ 广播。
+ * → 请求签名门（对实际字节哈希）→ 单事务（blob 落位 + submit 定序）→ 广播。
+ * verifyRequest 在字节哈希算定后、任何持久写入前调用（不缓冲整个 body）。
  */
 export async function receiveUpload(
   core: DaemonCore,
   workspaceId: string,
   stream: AsyncIterable<Buffer | Uint8Array | string>,
   signedEvent: unknown,
+  verifyRequest?: (bodySha256: string) => void,
 ): Promise<UploadResult> {
   const row = getWorkspaceRow(core.db, workspaceId);
   if (!row) throw new ArtifactUploadError("unknown-workspace", `unknown workspace: ${workspaceId}`);
@@ -161,6 +163,14 @@ export async function receiveUpload(
       "mismatch",
       `artifact mismatch: declared ${meta.sha256}/${meta.size}, actual ${digest}/${received}`,
     );
+  }
+
+  // 请求签名门：与实际字节哈希绑定；失败时临时文件已清理、blob 未落位
+  try {
+    verifyRequest?.(digest);
+  } catch (err) {
+    rmSync(tmpPath, { force: true });
+    throw err;
   }
 
   const blobPath = blobPathFor(core.dirs, meta.sha256);

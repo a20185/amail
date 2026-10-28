@@ -262,7 +262,7 @@ export function createWorkspace(
   const workspaceId = opts.id ?? `ws_${ulid()}`;
   const hostAddr = userAddress(core.dirs, core.identity);
   const event = {
-    eventId: `evt_${ulid()}`,
+    eventId: `we_${ulid()}`,
     actor: hostAddr,
     kind: "membership" as const,
     payload: { op: "add" as const, member: hostAddr },

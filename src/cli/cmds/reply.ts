@@ -39,6 +39,6 @@ export default function register(program: Command): void {
     .requiredOption("--body <body>", "reply body")
     .option("--ref <path>", "attachment file path (repeatable)", (value: string, previous: string[]) => [...previous, value], [])
     .action(async (msgId: string, opts: { body: string; ref: string[] }) => {
-      await runReply(msgId, opts);
+      await runReply(msgId, { body: opts.body, refs: opts.ref });
     });
 }

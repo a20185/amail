@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { resolveDirs } from "../../core/paths.js";
 import { openStore } from "../../core/db.js";
 import { startDaemon, type DaemonHandle } from "../../daemon/server.js";
+import { fakeMdns } from "../../daemon/e2e-kit.js";
 import { runWsCreate } from "./ws.js";
 import { listAttachable, runAttach, runDetach } from "./attach.js";
 
@@ -56,7 +57,7 @@ describe("attach CLI", () => {
       "utf8",
     );
 
-    const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR });
+    const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
     handles.push(handle);
     writeFileSync(
       join(dirs.configDir, "config.json"),
@@ -74,7 +75,7 @@ describe("attach CLI", () => {
     await expect(runAttach({ cli: "pi", env })).rejects.toThrow(/no attachable session/);
 
     const outcome = await runAttach({ session: SESSION_ID, env });
-    expect(outcome.attachEventId).toMatch(/^evt_/);
+    expect(outcome.attachEventId).toMatch(/^we_/);
     expect(outcome.session.sessionId).toBe(SESSION_ID);
 
     const db = openStore(dirs.storePath);

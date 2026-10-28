@@ -5,6 +5,7 @@ import { createWorkspace, WorkspaceHost } from "../../workspace/host.js";
 import { makeEvent } from "../../workspace/events.js";
 import { acceptInvite, parseInviteFromText, type WorkspaceInvite } from "../../workspace/invite.js";
 import { listInbox } from "../../core/store.js";
+import { runWsAction } from "../../cli/cmds/ws.js";
 import { pairDual, startDual, until, type DualSandbox } from "../e2e-kit.js";
 import { resetDeliveryConfig } from "../../core/delivery.js";
 import type { DaemonHandle } from "../server.js";
@@ -101,7 +102,7 @@ describe("workspace routes: 房主定序（回环）", () => {
   it("artifact 一律 422 use-upload-endpoint", async () => {
     const { a, wsId } = await dual("artifact");
     const artifact = {
-      eventId: "evt_01HGV2KP5Z4W7R8X9Y0ZABCD2F",
+      eventId: "we_01HGV2KP5Z4W7R8X9Y0ZABCD2F",
       actor: a.address,
       kind: "artifact",
       payload: {
@@ -293,6 +294,82 @@ describe("workspace routes: 邀请→准入→收敛", () => {
       body: bodyText,
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("workspace routes: 写路径归属与拒绝门", () => {
+  it("通用 events 入口拒绝 membership（422 use-invite-flow），房主/成员一律", async () => {
+    const { a, b, wsId } = await dual("membership");
+    const hostAdd = makeEvent(a.identity.signPrivPem, a.address, "membership", {
+      op: "add",
+      member: "eve@pc",
+    });
+    const hostRes = await hostFetch(a, `/ws/${wsId}/events`, { method: "POST", body: hostAdd });
+    expect(hostRes.status).toBe(422);
+    expect(((await hostRes.json()) as { error: string }).error).toBe("use-invite-flow");
+
+    const invite = (await (
+      await hostFetch(a, `/ws/${wsId}/invite`, { method: "POST", body: {} })
+    ).json()) as WorkspaceInvite;
+    await acceptInvite(b.dirs, invite);
+
+    const memberAdd = makeEvent(b.identity.signPrivPem, b.address, "membership", {
+      op: "add",
+      member: "eve@pc",
+    });
+    const memberRes = await memberFetch(b, a, `/ws/${wsId}/events`, { method: "POST", body: memberAdd });
+    expect(memberRes.status).toBe(422);
+    expect(((await memberRes.json()) as { error: string }).error).toBe("use-invite-flow");
+    expect(new WorkspaceHost(a, wsId).state().members).not.toContain("eve@pc");
+  });
+
+  it("成员 daemon 拒绝权威写入（409 not-host）；成员 CLI 写路径直连房主不分叉", async () => {
+    const { a, b, wsId } = await dual("fork");
+    const invite = (await (
+      await hostFetch(a, `/ws/${wsId}/invite`, { method: "POST", body: {} })
+    ).json()) as WorkspaceInvite;
+    await acceptInvite(b.dirs, invite);
+
+    // 成员本机回环提交 → 409，不落库
+    const fork = makeEvent(b.identity.signPrivPem, b.address, "action", {
+      who: b.address,
+      content: "fork-attempt",
+      cc: [],
+    });
+    const rejected = await hostFetch(b, `/ws/${wsId}/events`, { method: "POST", body: fork });
+    expect(rejected.status).toBe(409);
+    expect(((await rejected.json()) as { error: string }).error).toBe("not-host");
+    expect(new WorkspaceHost(a, wsId).state().actions.some((x) => x.payload.content === "fork-attempt")).toBe(
+      false,
+    );
+
+    // CLI 写路径：成员 → 直连房主 URL（带 X-Amail-Sig），房主定序
+    await runWsAction({
+      who: b.address,
+      content: "member-via-host",
+      cc: [],
+      env: { ...process.env, AMAIL_HOME: b.dirs.home },
+    });
+    expect(
+      new WorkspaceHost(a, wsId).state().actions.some((x) => x.payload.content === "member-via-host"),
+    ).toBe(true);
+    const localRows = b.db
+      .prepare("SELECT COUNT(*) AS n FROM workspace_events WHERE workspace_id = ? AND source = 'local'")
+      .get(wsId) as { n: number };
+    expect(localRows.n).toBe(0);
+  });
+
+  it("X-Amail-Date 入签名：窗口内改动 Date → 401；原签名 200", async () => {
+    const { a, wsId } = await dual("date");
+    const pathname = `/ws/${wsId}/state`;
+    const headers = amailSigHeaders(a.identity.signPrivPem, "GET", pathname, "", a.address);
+    const ok = await fetch(`http://127.0.0.1:${a.port}${pathname}`, { headers });
+    expect(ok.status).toBe(200);
+
+    const replay = await fetch(`http://127.0.0.1:${a.port}${pathname}`, {
+      headers: { ...headers, "X-Amail-Date": new Date(Date.now() - 60_000).toISOString() },
+    });
+    expect(replay.status).toBe(401);
   });
 });
 

@@ -20,9 +20,9 @@ import {
   WorkspaceEventSchema,
 } from "../contract/workspace.js";
 
-/** 事件 id：evt_ + ULID */
+/** 事件 id：we_ + ULID */
 export function newEventId(): string {
-  return `evt_${ulid()}`;
+  return `we_${ulid()}`;
 }
 
 /** todo id：td_ + ULID */
@@ -30,7 +30,7 @@ export function newTodoId(): string {
   return `td_${ulid()}`;
 }
 
-const EventIdSchema = z.string().regex(/^evt_[0-9A-HJKMNP-TV-Z]{26}$/);
+const EventIdSchema = z.string().regex(/^we_[0-9A-HJKMNP-TV-Z]{26}$/);
 
 /** 提交形事件：无 seq（seq 由房主分配），sig 覆盖 {eventId,actor,kind,payload,at} */
 const SubmitCommon = {
@@ -59,13 +59,24 @@ export interface SigningBase {
   at: string;
 }
 
-/** 提取签名载荷 */
+/** 各 kind 的 payload schema：签名载荷按 schema 声明序归一（契约序） */
+const PayloadByKind = {
+  action: ActionPayloadSchema,
+  todo: TodoPayloadSchema,
+  artifact: ArtifactMetaSchema,
+  membership: MembershipPayloadSchema,
+  "session.attach": SessionAttachPayloadSchema,
+  "session.detach": SessionDetachPayloadSchema,
+} as const;
+
+/** 提取签名载荷：五段显式声明序 + payload 经 schema 解析（键序=契约声明序） */
 export function eventSigningPayload(event: SubmitEvent | WorkspaceEvent | SigningBase): SigningBase {
+  const schema = (PayloadByKind as Record<string, z.ZodTypeAny | undefined>)[event.kind];
   return {
     eventId: event.eventId,
     actor: event.actor,
     kind: event.kind,
-    payload: event.payload,
+    payload: schema ? schema.parse(event.payload) : event.payload,
     at: event.at,
   };
 }
@@ -88,8 +99,9 @@ export function makeEvent<K extends keyof EventByKind & SubmitEvent["kind"]>(
   at: string = new Date().toISOString(),
 ): SubmitEvent {
   const eventId = newEventId();
-  const base = { eventId, actor, kind, payload, at };
-  const sig = signCanonical(privPem, base);
+  const normalized = PayloadByKind[kind].parse(payload);
+  const base = { eventId, actor, kind, payload: normalized, at };
+  const sig = signCanonical(privPem, eventSigningPayload(base));
   return { ...base, sig } as SubmitEvent;
 }
 

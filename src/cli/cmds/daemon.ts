@@ -152,9 +152,23 @@ export async function daemonStop(env: NodeJS.ProcessEnv = process.env): Promise<
   return true;
 }
 
+/**
+ * --port 覆盖与 config.json 端口不一致时的提示：CLI 客户端只读 config.port，
+ * 覆盖监听口后客户端仍会连配置端口，需显式告知。
+ */
+export function portMismatchNotice(
+  requested: number | undefined,
+  configured: number,
+): string | undefined {
+  if (requested === undefined || requested === configured) return undefined;
+  return `--port ${requested} 与 config.json 端口 ${configured} 不一致，客户端仍读 config.port（${configured}）`;
+}
+
 /** 前台运行；pid 锁被占 → DaemonAlreadyRunningError{exitCode:3} 由调用方映射进程退出码 */
 export async function runForeground(port?: number, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const dirs = resolveDirs(env);
+  const notice = portMismatchNotice(port, daemonPort(dirs));
+  if (notice) console.warn(notice);
   const handle = await startDaemon({ port, dirs });
   console.log(`amail daemon listening on [::]:${handle.port} — ${handle.address}`);
   const { promise, resolve } = Promise.withResolvers<void>();

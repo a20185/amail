@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { resolveDirs } from "../core/paths.js";
 import { sha256Hex } from "../core/crypto.js";
 import { startDaemon, type DaemonHandle } from "../daemon/server.js";
+import { fakeMdns } from "../daemon/e2e-kit.js";
 import { createWorkspace, WorkspaceHost } from "./host.js";
 import { makeEvent } from "./events.js";
 import {
@@ -27,7 +28,7 @@ afterEach(async () => {
 async function host(tag: string): Promise<{ handle: DaemonHandle; wsId: string }> {
   const home = mkdtempSync(join(tmpdir(), `amail-artifacts-${tag}-`));
   const dirs = resolveDirs({ AMAIL_HOME: home });
-  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR });
+  const handle = await startDaemon({ port: 0, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
   handles.push(handle);
   const wsId = createWorkspace(handle, { name: "Proj", projectSlug: "proj" });
   return { handle, wsId };

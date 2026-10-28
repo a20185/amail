@@ -58,7 +58,9 @@ describe("archiveMessage", () => {
     expect(md).toContain('"progress":"done"');
     expect(md).toContain("## Handoff");
     expect(md).toContain(`- att.bin (${blobBytes.length}B, sha256=${sha256Hex(blobBytes)})`);
-    expect(existsSync(join(archiveDir, "attachments", id, "att.bin"))).toBe(true);
+    expect(
+      existsSync(join(archiveDir, "attachments", id, `${sha256Hex(blobBytes).slice(0, 8)}-att.bin`)),
+    ).toBe(true);
 
     expect(get(stub.handle.db, id)?.archived_at).not.toBeNull();
     expect(get(stub.handle.db, id)?.project).toBe("web");

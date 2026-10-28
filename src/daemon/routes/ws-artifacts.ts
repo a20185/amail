@@ -13,7 +13,7 @@ import { createReadStream } from "node:fs";
 import { sendJson, type Route, type RouteCtx } from "../router.js";
 import { WorkspaceHost, getWorkspaceRow, type WorkspaceRow } from "../../workspace/host.js";
 import { ArtifactUploadError, decodeUploadMeta, fetchBlob, receiveUpload } from "../../workspace/artifacts.js";
-import { checkRequestSig } from "./workspace.js";
+import { checkRequestSig, SIG_DATE_WINDOW_MS } from "./workspace.js";
 
 function header(ctx: RouteCtx, name: string): string | undefined {
   const value = ctx.req.headers[name.toLowerCase()];
@@ -57,8 +57,26 @@ async function handleUpload(ctx: RouteCtx): Promise<void> {
     sendJson(ctx.res, 400, { error: "invalid-meta" });
     return;
   }
+  // 请求签名门（统一门面）：X-Amail-Sig 对 (method + path + 实际字节哈希 + Date) 签名；
+  // 头部存在性与 Date 窗先判，字节哈希在流末算定后校验（绑定本路径，跨工作区重放 401）
+  const sig = header(ctx, "X-Amail-Sig");
+  const date = header(ctx, "X-Amail-Date");
+  const sentAt = date ? Date.parse(date) : Number.NaN;
+  if (!sig || !date || !Number.isFinite(sentAt) || Math.abs(Date.now() - sentAt) > SIG_DATE_WINDOW_MS) {
+    sendJson(ctx.res, 401, { error: "unauthorized" });
+    return;
+  }
   try {
-    const result = await receiveUpload(ctx, row.id, ctx.req, signedEvent);
+    const result = await receiveUpload(ctx, row.id, ctx.req, signedEvent, (bodySha256) => {
+      const host = new WorkspaceHost(ctx, row.id);
+      const gate = checkRequestSig(ctx, host.state().members, host.hostAddr, bodySha256);
+      if (!gate.ok) {
+        throw new ArtifactUploadError(
+          gate.status === 403 ? "not-member" : "bad-sig",
+          "request signature check failed",
+        );
+      }
+    });
     sendJson(ctx.res, result.duplicate ? 200 : 201, {
       seq: result.seq,
       artifactId: result.artifactId,

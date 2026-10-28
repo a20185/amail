@@ -5,6 +5,7 @@ import { ulid } from "ulid";
 import type { DatabaseSync } from "node:sqlite";
 import { resolveDirs, type Dirs } from "../core/paths.js";
 import { startDaemon, type DaemonHandle } from "../daemon/server.js";
+import { fakeMdns } from "../daemon/e2e-kit.js";
 import { saveInbound } from "../core/store.js";
 import { sealBody, sha256Hex, signCanonical } from "../core/crypto.js";
 import { loadOrCreateIdentity, type DeviceIdentityFull } from "../core/identity.js";
@@ -32,7 +33,7 @@ export function writeConfig(home: string, port: number): Dirs {
 /** P2 startDaemon 随机端口测试桩 + config.json 同步 */
 export async function startStub(home: string): Promise<{ handle: DaemonHandle; dirs: Dirs }> {
   const dirs = resolveDirs({ AMAIL_HOME: home });
-  const handle = await startDaemon({ port: 0, dirs });
+  const handle = await startDaemon({ port: 0, dirs, mdns: fakeMdns });
   writeConfig(home, handle.port);
   return { handle, dirs };
 }

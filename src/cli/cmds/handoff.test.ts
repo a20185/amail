@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { Command } from "commander";
 import { sandboxEnv, startStub } from "../testkit.js";
 import { resolveDirs } from "../../core/paths.js";
 import { savePeer } from "../../core/peer.js";
@@ -10,7 +11,7 @@ import { openBody } from "../../core/crypto.js";
 import { configureDelivery, resetDeliveryConfig } from "../../core/delivery.js";
 import { loadOrCreateIdentity, type DeviceIdentityFull } from "../../core/identity.js";
 import type { DaemonHandle } from "../../daemon/server.js";
-import { runHandoff } from "./handoff.js";
+import registerHandoff, { runHandoff } from "./handoff.js";
 import type { Envelope } from "../../contract/envelope.js";
 
 let stub: { handle: DaemonHandle } | undefined;
@@ -40,6 +41,22 @@ async function startWithPeer(home: string): Promise<{ handle: DaemonHandle; peer
   });
   configureDelivery({ browse: async () => [] });
   return { handle: stubbed.handle, peerAddr: `bob@${peerIdentity.deviceName}`, peerIdentity };
+}
+
+/** CLI 真实入口只读 process.env：临时切到沙箱 AMAIL_HOME */
+async function withHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  const saved = { AMAIL_HOME: process.env.AMAIL_HOME, HOME: process.env.HOME };
+  process.env.AMAIL_HOME = home;
+  process.env.HOME = home;
+  try {
+    return await fn();
+  } finally {
+    for (const key of ["AMAIL_HOME", "HOME"] as const) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 }
 
 describe("amail handoff", () => {
@@ -103,5 +120,38 @@ describe("amail handoff", () => {
     await expect(runHandoff("bob@x", { env })).rejects.toThrow(
       "--progress and at least one --question are required",
     );
+  });
+
+  it("经真实 Commander 解析：--ref 映射到 refs（附件不丢）", async () => {
+    const { home } = sandboxEnv();
+    const { handle, peerAddr } = await startWithPeer(home);
+    const ref = join(home, "handoff-ref.md");
+    writeFileSync(ref, "handoff-ref");
+
+    const program = new Command();
+    registerHandoff(program);
+    await withHome(home, () =>
+      program.parseAsync([
+        "node",
+        "amail",
+        "handoff",
+        peerAddr,
+        "--progress",
+        "p",
+        "--question",
+        "q?",
+        "--ref",
+        ref,
+      ]),
+    );
+
+    const row = handle.db
+      .prepare("SELECT payload_json FROM outbox")
+      .get() as { payload_json: string } | undefined;
+    expect(row).toBeDefined();
+    const payload = JSON.parse(row!.payload_json) as {
+      envelope: { attachments: Array<{ name: string }> };
+    };
+    expect(payload.envelope.attachments.map((a) => a.name)).toEqual(["handoff-ref.md"]);
   });
 });

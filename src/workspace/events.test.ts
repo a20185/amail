@@ -69,7 +69,7 @@ describe("events: applyEvent 折叠", () => {
     expect(state.attached[0]!.attachEventId).toBe(att1.eventId);
 
     // 旧 detach（不匹配）→ no-op，事件仅作审计
-    const stale = makeEvent(host.priv, actor, "session.detach", { sessionId: "s1", attachEventId: "evt_01HGV2KP5Z4W7R8X9Y0ZABCXYZ" });
+    const stale = makeEvent(host.priv, actor, "session.detach", { sessionId: "s1", attachEventId: "we_01HGV2KP5Z4W7R8X9Y0ZABCXYZ" });
     applyEvent(state, seqEvent(2, stale));
     expect(state.attached).toHaveLength(1);
 
@@ -90,6 +90,12 @@ describe("events: applyEvent 折叠", () => {
 });
 
 describe("events: 签名", () => {
+  it("生成的事件 id 前缀 we_（与契约一致）", () => {
+    expect(makeEvent(keypair().priv, "alice@laptop", "action", { who: "a@b", content: "x", cc: [] }).eventId).toMatch(
+      /^we_[0-9A-HJKMNP-TV-Z]{26}$/,
+    );
+  });
+
   it("sig 覆盖五段（不含 seq），seq 不参与验签", () => {
     const host = keypair();
     const other = keypair();
@@ -104,7 +110,7 @@ describe("events: 签名", () => {
     expect(verifyEventSig(host.pub, withSeq)).toBe(true);
   });
 
-  it("eventSigningPayload 排除 seq 与 sig，canonical 字节确定", () => {
+  it("eventSigningPayload 排除 seq 与 sig，payload 键序归一为契约声明序", () => {
     const host = keypair();
     const event = makeEvent(host.priv, "alice@laptop", "membership", { op: "add", member: "bob@pc" });
     const payload = eventSigningPayload(event);
@@ -117,7 +123,25 @@ describe("events: 签名", () => {
     });
     // 手工重签一致
     expect(signCanonical(host.priv, payload)).toBe(event.sig);
-    expect(Object.keys(JSON.parse(canonicalStringify(payload)))).toEqual([...Object.keys(JSON.parse(canonicalStringify(payload)))].sort());
+
+    // 乱序构造的 artifact payload → 声明序（契约序）归一后建签并验过
+    const scrambled = {
+      sha256: "a".repeat(64),
+      tags: ["t"],
+      size: 3,
+      mime: "text/plain",
+      name: "n",
+      artifactId: "art_01HGV2KP5Z4W7R8X9Y0ZABCDEF",
+    };
+    const artifact = makeEvent(host.priv, "alice@laptop", "artifact", scrambled);
+    expect(Object.keys(artifact.payload)).toEqual(["artifactId", "name", "mime", "size", "tags", "sha256"]);
+    expect(verifyEventSig(host.pub, artifact)).toBe(true);
+    // 验签侧同样按声明序归一：字典序重排的载荷副本仍属同一事件
+    const shuffled = {
+      ...artifact,
+      payload: { sha256: scrambled.sha256, tags: ["t"], size: 3, mime: "text/plain", name: "n", artifactId: scrambled.artifactId },
+    } as typeof artifact;
+    expect(verifyEventSig(host.pub, shuffled)).toBe(true);
   });
 });
 

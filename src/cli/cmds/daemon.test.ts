@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
-import { daemonStatus, daemonStop, installDaemon } from "../../cli/cmds/daemon.js";
+import { daemonStatus, daemonStop, installDaemon, portMismatchNotice } from "../../cli/cmds/daemon.js";
 import { DaemonAlreadyRunningError, startDaemon } from "../../daemon/server.js";
 import { resolveDirs } from "../../core/paths.js";
 import { sandboxEnv, startStub, writeConfig } from "../testkit.js";
@@ -70,5 +70,16 @@ describe("pid lock mapping", () => {
     expect(err).toBeInstanceOf(DaemonAlreadyRunningError);
     expect((err as DaemonAlreadyRunningError).exitCode).toBe(3);
     child.kill();
+  });
+});
+
+describe("portMismatchNotice", () => {
+  it("--port 与 config.port 不一致时提示客户端仍读 config.port；一致/未覆盖无提示", () => {
+    const notice = portMismatchNotice(40000, 36969);
+    expect(notice).toBeDefined();
+    expect(notice).toContain("config.port");
+    expect(notice).toContain("36969");
+    expect(portMismatchNotice(36969, 36969)).toBeUndefined();
+    expect(portMismatchNotice(undefined, 36969)).toBeUndefined();
   });
 });

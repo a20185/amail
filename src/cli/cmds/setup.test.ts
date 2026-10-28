@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { mapGitNameToUser, readGitIdentity, runSetup } from "../../cli/cmds/setup.js";
+import { normalizeUser, userAddress } from "../../daemon/server.js";
+import { loadOrCreateIdentity } from "../../core/identity.js";
 import { resolveDirs } from "../../core/paths.js";
 import { sandboxEnv } from "../testkit.js";
 
@@ -16,6 +18,24 @@ describe("mapGitNameToUser", () => {
   it("empty result falls back to user", () => {
     expect(mapGitNameToUser("@@@")).toBe("user");
     expect(mapGitNameToUser("")).toBe("user");
+  });
+});
+
+describe("normalizeUser 一致性（setup 展示 = daemon 实际地址）", () => {
+  it("mapGitNameToUser 与 normalizeUser 同规则；userAddress 使用同一规则", () => {
+    for (const name of ["Zhang San@Corp", "Alice Cooper", "bob", "@@@", "  A  B  ", "Ünïcode Name"]) {
+      expect(mapGitNameToUser(name), name).toBe(normalizeUser(name));
+    }
+
+    const { home } = sandboxEnv();
+    const dirs = resolveDirs({ AMAIL_HOME: home });
+    writeFileSync(
+      join(dirs.configDir, "config.json"),
+      JSON.stringify({ version: 1, name: "Zhang San@Corp", email: "z@example.com", port: 36969, notify: true }),
+      "utf8",
+    );
+    const identity = loadOrCreateIdentity(dirs);
+    expect(userAddress(dirs, identity)).toBe(`zhang-sancorp@${identity.deviceName}`);
   });
 });
 

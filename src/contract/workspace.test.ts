@@ -3,13 +3,21 @@ import { WorkspaceEventSchema } from "./workspace.js";
 
 const base = {
   seq: 3,
-  eventId: "evt_01JD2YWBN5GQXJSQ9P7RJ3TBEM",
+  eventId: "we_01JD2YWBN5GQXJSQ9P7RJ3TBEM",
   actor: "alice@mbp16",
   at: "2026-10-27T09:00:00.000Z",
   sig: "c2ln",
 };
 
 describe("WorkspaceEventSchema", () => {
+  it("eventId 前缀为 we_（契约）；evt_ 旧前缀拒绝", () => {
+    const ev = { ...base, kind: "action", payload: { who: "alice@mbp16", content: "x", cc: [] } };
+    expect(WorkspaceEventSchema.safeParse(ev).success).toBe(true);
+    expect(
+      WorkspaceEventSchema.safeParse({ ...ev, eventId: "evt_01JD2YWBN5GQXJSQ9P7RJ3TBEM" }).success,
+    ).toBe(false);
+  });
+
   it("round-trips action", () => {
     const ev = {
       ...base,
@@ -72,7 +80,7 @@ describe("WorkspaceEventSchema", () => {
       kind: "session.detach",
       payload: {
         sessionId: "s1",
-        attachEventId: "evt_01JD2YWBN5GQXJSQ9P7RJ3TBEM",
+        attachEventId: "we_01JD2YWBN5GQXJSQ9P7RJ3TBEM",
       },
     };
     expect(WorkspaceEventSchema.parse(detach)).toEqual(detach);

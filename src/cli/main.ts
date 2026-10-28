@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readdir } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Command } from "commander";
@@ -43,8 +44,21 @@ export async function main(argv: string[] = process.argv): Promise<number> {
   return 0;
 }
 
-const isEntry =
-  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+/**
+ * 入口判定。npm 全局安装把 bin 做成指向 dist/cli/main.js 的符号链接：
+ * argv[1] 是链接路径，import.meta.url 是真实路径，直接比较会漏掉入口。
+ * 两侧 realpath 后比较。
+ */
+export function isMainEntry(argv1: string | undefined, metaUrl: string): boolean {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(metaUrl));
+  } catch {
+    return false;
+  }
+}
+
+const isEntry = isMainEntry(process.argv[1], import.meta.url);
 if (isEntry) {
   main().catch((err: NodeJS.ErrnoException & { exitCode?: number }) => {
     console.error(`amail: ${err.message}`);
