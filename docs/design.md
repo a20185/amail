@@ -233,7 +233,7 @@ sequenceDiagram
 
 ### 17.3 准入：邀请信
 
-房主 `amail ws create`（挂本地项目）→ 发内嵌工作区邀请块的信（workspace id + 房主声明 + 房主签名）→ 对端 `POST /ws/:id/join` 提交邀请块与自身设备签名，房主验签后代为生成 membership add 事件（被邀请方入组前不是成员，准入由 join 专用路由完成）→ 即成员（前置：已配对）。成员变更本身是 membership 事件，可审计。
+房主 `amail ws create`（挂本地项目）→ 发内嵌工作区邀请块的信（workspace id + 房主声明 + 房主签名）→ 对端 `POST /ws/:id/join` 提交邀请块与自身设备签名，房主验签后**构造并签署 membership add 事件（actor=房主、payload.member=被邀请方——房主恒为成员可过成员检查；被邀请方入组前不自行提交事件）**经定序落库 → 即成员（前置：已配对）。成员变更本身是 membership 事件，可审计。
 
 ### 17.4 sessions：显式 attach 的只读镜像
 
