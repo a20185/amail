@@ -1,5 +1,5 @@
 /** 守护进程事件总线：SSE /v1/events 的内存扇出层 */
-export type BusEventType = "new-mail" | "receipt" | "outbox" | "pairing";
+export type BusEventType = "new-mail" | "receipt" | "outbox" | "pairing" | "ws-event";
 
 export interface BusEvent {
   type: BusEventType;

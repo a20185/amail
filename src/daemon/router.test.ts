@@ -20,8 +20,8 @@ describe("route discovery", () => {
     expect(paths).toContain("POST /v1/send");
     expect(routes.find((r) => r.path === "/alive")?.lan).toBe(true);
     expect(routes.find((r) => r.path === "/v1/send")?.lan).toBe(false);
-    // P4 起 deliver.ts 挂投递生命周期 init
-    expect(inits).toHaveLength(1);
+    // P4 deliver.ts + P6 workspace.ts 挂生命周期 init
+    expect(inits).toHaveLength(2);
   });
 
   it("收集模块可选 init 并返回 disposer", async () => {
