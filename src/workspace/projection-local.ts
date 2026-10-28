@@ -148,9 +148,11 @@ function myAddr(core: DaemonCore): string {
   return userAddress(core.dirs, core.identity);
 }
 
-async function signedGet(core: DaemonCore, base: string, pathname: string): Promise<Response> {
+async function signedGet(core: DaemonCore, base: string, pathAndQuery: string): Promise<Response> {
+  // 签名只覆盖 pathname（与 checkRequestSig 一致），query 不参与签名
+  const pathname = pathAndQuery.split("?")[0]!;
   const headers = amailSigHeaders(core.identity.signPrivPem, "GET", pathname, "", myAddr(core));
-  return fetch(`${base}${pathname}`, { headers });
+  return fetch(`${base}${pathAndQuery}`, { headers });
 }
 
 async function signedPost(core: DaemonCore, base: string, pathname: string, payload: unknown): Promise<Response> {

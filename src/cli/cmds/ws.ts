@@ -22,14 +22,14 @@ export interface WsOptions {
   cwd?: string;
 }
 
-interface WsCtx {
+export interface WsCtx {
   dirs: Dirs;
   db: DatabaseSync;
   identity: DeviceIdentityFull;
   myAddr: string;
 }
 
-function openWsCtx(env?: NodeJS.ProcessEnv): WsCtx {
+export function openWsCtx(env?: NodeJS.ProcessEnv): WsCtx {
   const dirs = resolveDirs(env ?? process.env);
   const db = openStore(dirs.storePath);
   const identity = loadOrCreateIdentity(dirs);
@@ -46,7 +46,7 @@ export interface WsOptions {
   cwd?: string;
 }
 
-function resolveWs(ctx: WsCtx, explicit?: string): WorkspaceRow {
+export function resolveWs(ctx: WsCtx, explicit?: string): WorkspaceRow {
   if (explicit) {
     const row = getWorkspaceRow(ctx.db, explicit);
     if (!row) throw new Error(`unknown workspace: ${explicit}`);

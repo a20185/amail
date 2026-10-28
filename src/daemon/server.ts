@@ -162,7 +162,7 @@ export function createHandler({ core, routes }: RequestHandlerArgs) {
       }
 
       let body: unknown;
-      if (matched.route.method === "POST") {
+      if (matched.route.method !== "GET") {
         body = await readBody(req);
       }
       const ctx: RouteCtx = {

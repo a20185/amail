@@ -17,7 +17,7 @@ export interface DaemonCore {
 
 /** 单条路由：path 支持 `:param` 段 */
 export interface Route {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "DELETE";
   path: string;
   /** true = LAN 面可达；false = 仅规范化 loopback 源放行 */
   lan: boolean;

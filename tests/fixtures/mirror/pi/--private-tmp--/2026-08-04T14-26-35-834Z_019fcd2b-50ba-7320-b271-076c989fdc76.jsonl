@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"019fcd2b-50ba-7320-b271-076c989fdc76","timestamp":"2026-08-04T14:26:35.834Z","cwd":"/private/tmp"}
+{"type":"model_change","id":"4096fd5f","parentId":null,"timestamp":"2026-08-04T14:26:36.031Z","provider":"anthropic","modelId":"claude-opus-4-8"}
+{"type":"thinking_level_change","id":"6b6b831f","parentId":"4096fd5f","timestamp":"2026-08-04T14:26:36.031Z","thinkingLevel":"medium"}
+{"type":"message","id":"58c0c98b","parentId":"6b6b831f","timestamp":"2026-08-04T14:26:36.046Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":1785853596045}}
+{"type":"message","id":"efab4a29","parentId":"58c0c98b","timestamp":"2026-08-04T14:26:36.946Z","message":{"role":"assistant","content":[],"api":"anthropic-messages","provider":"anthropic","model":"claude-opus-4-8","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1785853596071,"errorMessage":"403 {\"error\":{\"type\":\"forbidden\",\"message\":\"Request not allowed\"}}"}}

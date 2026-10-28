@@ -46,7 +46,7 @@ function sendSigError(ctx: RouteCtx, status: number): void {
  * - LAN 来源：验签 + 该设备 ∈ peers 已配对 + ∈ 成员表
  * 无签名/伪造 401，非成员 403。
  */
-function checkRequestSig(ctx: RouteCtx, members: string[], hostAddr: string): SigGateResult {
+export function checkRequestSig(ctx: RouteCtx, members: string[], hostAddr: string): SigGateResult {
   const sig = header(ctx, "X-Amail-Sig");
   const date = header(ctx, "X-Amail-Date");
   if (!sig || !date) return { ok: false, status: 401 };
