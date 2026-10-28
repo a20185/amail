@@ -162,7 +162,7 @@ export function createHandler({ core, routes }: RequestHandlerArgs) {
       }
 
       let body: unknown;
-      if (matched.route.method !== "GET") {
+      if (matched.route.method !== "GET" && !matched.route.raw) {
         body = await readBody(req);
       }
       const ctx: RouteCtx = {

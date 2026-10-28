@@ -64,6 +64,14 @@ export function resolveWs(ctx: WsCtx, explicit?: string): WorkspaceRow {
 }
 
 
+/** 工作区端点基址：本机房主 → 回环 daemon；成员 → mDNS 解析房主 */
+export async function resolveWorkspaceBase(ctx: WsCtx, row: WorkspaceRow): Promise<string> {
+  if (row.host_addr === ctx.myAddr) return `http://127.0.0.1:${daemonPort(ctx.dirs)}`;
+  const resolved = await resolveHostBase(ctx.db, row.host_addr);
+  if (!resolved) throw new Error(`host ${row.host_addr} unreachable — is the daemon running?`);
+  return resolved;
+}
+
 async function submitEvent(ctx: WsCtx, row: WorkspaceRow, event: SubmitEvent): Promise<{ seq: number }> {
   const pathname = `/ws/${row.id}/events`;
   const bodyText = canonicalStringify(event);
@@ -71,14 +79,7 @@ async function submitEvent(ctx: WsCtx, row: WorkspaceRow, event: SubmitEvent): P
     "content-type": "application/json",
     ...amailSigHeaders(ctx.identity.signPrivPem, "POST", pathname, bodyText, ctx.myAddr),
   };
-  let base: string;
-  if (row.host_addr === ctx.myAddr) {
-    base = `http://127.0.0.1:${daemonPort(ctx.dirs)}`;
-  } else {
-    const resolved = await resolveHostBase(ctx.db, row.host_addr);
-    if (!resolved) throw new Error(`host ${row.host_addr} unreachable — is the daemon running?`);
-    base = resolved;
-  }
+  const base = await resolveWorkspaceBase(ctx, row);
   const res = await fetch(`${base}${pathname}`, { method: "POST", headers, body: bodyText });
   const out = (await res.json().catch(() => ({}))) as { seq?: number; error?: string };
   if (!res.ok) throw new Error(`submit ${res.status}: ${String(out.error ?? res.statusText)}`);

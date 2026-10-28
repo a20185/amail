@@ -83,12 +83,22 @@ function ccBody(who: string, content: string, note: string | undefined, workspac
   return `${who}: ${summary}\nworkspaceId: ${workspaceId}`;
 }
 
+export interface SubmitOptions {
+  /**
+   * 外部事务模式：调用方已开启事务；submit 只做落库，不自开/提交事务，也不广播。
+   * 调用方 COMMIT 后必须调用 broadcastSubmit(result)。
+   */
+  transaction?: boolean;
+}
+
 /**
  * 房主权威工作区：submit（定序+CC 分派）、eventsSince、state（折叠）。
  * submit 是纯定序入口，不做 kind 限制——artifact 拒绝门在通用路由层。
  */
 export class WorkspaceHost {
   readonly hostAddr: string;
+  /** 外部事务模式下暂存的 CC 通知（COMMIT 后由 broadcastSubmit 放行） */
+  private pendingNotices = new Map<number, { to: string; outboxId: string }[]>();
 
   constructor(
     private core: DaemonCore,
@@ -129,7 +139,8 @@ export class WorkspaceHost {
   }
 
   /** 提交：eventId 幂等 → 验成员 + 验签 → 分配 seq → 单事务（事件+索引+CC 分派）→ bus 广播 */
-  submit(input: unknown): SubmitResult {
+  submit(input: unknown, options: SubmitOptions = {}): SubmitResult {
+    const ownTransaction = options.transaction !== true;
     const parsed = SubmitEventSchema.safeParse(input);
     if (!parsed.success) {
       throw new WorkspaceSubmitError("invalid", `invalid event: ${parsed.error.message}`);
@@ -167,7 +178,7 @@ export class WorkspaceHost {
 
     const db = this.core.db;
     const notices: { to: string; outboxId: string }[] = [];
-    db.exec("BEGIN");
+    if (ownTransaction) db.exec("BEGIN");
     try {
       db.prepare(
         "INSERT INTO workspace_events (workspace_id, seq, source, event_json) VALUES (?, ?, 'local', ?)",
@@ -217,18 +228,26 @@ export class WorkspaceHost {
           }
         }
       }
-      db.exec("COMMIT");
+      if (ownTransaction) db.exec("COMMIT");
     } catch (err) {
-      db.exec("ROLLBACK");
+      if (ownTransaction) db.exec("ROLLBACK");
       throw err;
     }
 
-    this.core.bus.emit("ws-event", { workspaceId: this.workspaceId, seq, event });
-    // 触发出箱即时直投（与 /v1/send 一致）
+    const result: SubmitResult = { seq, duplicate: false, event };
+    this.pendingNotices.set(seq, notices);
+    if (ownTransaction) this.broadcastSubmit(result);
+    return result;
+  }
+
+  /** 外部事务 COMMIT 后放行广播（own-transaction 模式由 submit 内部调用） */
+  broadcastSubmit(result: SubmitResult): void {
+    const notices = this.pendingNotices.get(result.seq) ?? [];
+    this.pendingNotices.delete(result.seq);
+    this.core.bus.emit("ws-event", { workspaceId: this.workspaceId, seq: result.seq, event: result.event });
     for (const n of notices) {
       this.core.bus.emit("outbox", { outboxId: n.outboxId, to: n.to });
     }
-    return { seq, duplicate: false, event };
   }
 }
 

@@ -26,7 +26,30 @@ describe("skills/amail/SKILL.md", () => {
   });
 });
 
+describe("skills/amail-ws/SKILL.md", () => {
+  it("frontmatter 可解析：name=amail-ws，version=0.1.0；正文覆盖工作区操作面与护栏", async () => {
+    const fm = await parseFrontmatter(join(repoSkills, "amail-ws", "SKILL.md"));
+    expect(fm.name).toBe("amail-ws");
+    expect(fm.version).toBe("0.1.0");
+    expect(fm.description?.length ?? 0).toBeGreaterThan(0);
+    expect(fm.description!.length).toBeLessThanOrEqual(200);
+    for (const kw of ["工作区", "artifact", "attach"]) expect(fm.description).toContain(kw);
+    const body = readFileSync(join(repoSkills, "amail-ws", "SKILL.md"), "utf8");
+    for (const kw of ["只读镜像", "事件即审计", "amail artifact", "amail attach", "护栏"]) {
+      expect(body).toContain(kw);
+    }
+  });
+});
+
 describe("amail skill install", () => {
+  it("安装后沙箱出现两个技能目录（amail + amail-ws）", async () => {
+    const dir = targetDir();
+    const installed = await runSkillInstall({ dir });
+    expect(installed).toEqual(["amail", "amail-ws"]);
+    expect((await readdir(dir)).filter((n) => !n.includes(".bak.")).sort()).toEqual(["amail", "amail-ws"]);
+    expect(readFileSync(join(dir, "amail-ws", "SKILL.md"), "utf8")).toContain("name: amail-ws");
+  });
+
   it("扫包内每个技能目录整目录复制到 --dir", async () => {
     const dir = targetDir();
     const installed = await runSkillInstall({ dir });

@@ -21,6 +21,8 @@ export interface Route {
   path: string;
   /** true = LAN 面可达；false = 仅规范化 loopback 源放行 */
   lan: boolean;
+  /** true = 不预读 JSON body，handler 直接从 ctx.req 流式消费（如二进制工件上传） */
+  raw?: boolean;
   handler: (ctx: RouteCtx) => void | Promise<void>;
 }
 
