@@ -42,7 +42,7 @@ export function loadUserConfig(dirs: Dirs): UserConfig {
       name: typeof raw.name === "string" && raw.name ? raw.name : "user",
       email: typeof raw.email === "string" && raw.email ? raw.email : "user@example.com",
       port:
-        typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0
+        typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0 && raw.port <= 65535
           ? raw.port
           : DEFAULT_PORT,
     };
@@ -258,8 +258,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     Promise.withResolvers<void>();
   const onError = (err: Error) => onListenError(err);
   server.once("error", onError);
-  server.listen(port, "::", () => onListening());
   try {
+    // listen 同步抛（如端口越界 RangeError）同样走清理路径：pid/DB/后台任务不得残留
+    server.listen(port, "::", () => onListening());
     await listening;
   } catch (err) {
     // 监听失败（如 EADDRINUSE）：清理已占用的资源后上抛，不得报成功

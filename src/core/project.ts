@@ -58,9 +58,28 @@ interface AttachmentRow {
   sha256: string;
 }
 
+/** 落盘名总长上限（字节）：NAME_MAX 255 下留余量，避免长名 + 哈希前缀溢出 ENAMETOOLONG */
+const MAX_STORED_NAME_BYTES = 200;
+
+/** 按 UTF-8 字节截断，且不截断多字节字符中途（只按完整 code point 累积） */
+function truncateUtf8(input: string, maxBytes: number): string {
+  if (Buffer.byteLength(input, "utf8") <= maxBytes) return input;
+  let out = "";
+  let used = 0;
+  for (const char of input) {
+    const bytes = Buffer.byteLength(char, "utf8");
+    if (used + bytes > maxBytes) break;
+    out += char;
+    used += bytes;
+  }
+  return out;
+}
+
 /**
  * 附件归档落盘名：原名仅取 basename，含路径分隔符/上溯段的名字整体拒绝
  * （不复制），哈希前缀防同名覆盖；原名只保留在正文元数据里。
+ * 总长按 UTF-8 字节截断到 MAX_STORED_NAME_BYTES（哈希前缀 + '-' + basename），
+ * 长名不再触发 ENAMETOOLONG。
  */
 function archiveBlobName(att: AttachmentRow): string | undefined {
   const raw = att.name;
@@ -68,7 +87,10 @@ function archiveBlobName(att: AttachmentRow): string | undefined {
   const base = basename(raw);
   if (!base || base === "." || base === "..") return undefined;
   const prefix = att.sha256.slice(0, 8).replace(/[^0-9a-f]/g, "") || "blob";
-  return `${prefix}-${base}`;
+  const budget = MAX_STORED_NAME_BYTES - Buffer.byteLength(`${prefix}-`, "utf8");
+  const truncated = truncateUtf8(base, budget);
+  if (!truncated) return undefined;
+  return `${prefix}-${truncated}`;
 }
 
 function renderMarkdown(row: MessageRow, attachments: AttachmentRow[], attDir: string): string {

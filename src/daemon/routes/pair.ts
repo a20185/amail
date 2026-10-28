@@ -290,19 +290,24 @@ const routes: Route[] = [
     },
   },
   {
-    // 待推进的远端会话列表（应答方 CLI 据此自动转入应答模式）：
-    // 未 answer 的 offer + 已 answer 未 confirm 的会话（`--confirm` 复用刚显示 SAS 的那个 nonce）
+    // 待推进会话列表（CLI 据此复用刚显示 SAS 的那个 nonce，不新建 offer）：
+    // - local=false：远端 offer（未 answer + 已 answer 未 confirm）→ 应答方 CLI 转入应答模式
+    // - local=true：本机发起且已 answer 未 confirm → 发起方 CLI 的 --confirm 复用同一会话
     method: "GET",
     path: "/v1/pair/pending",
     lan: false,
     handler({ res, db }) {
       const pending = [...sessions(db).values()]
-        .filter((s) => !s.local && !s.peer)
-        .map((s) => ({
-          offerNonce: s.offerNonce,
-          user: `${normalizeUser(s.offer.claim.name)}@${addressSegment(s.offer.deviceName)}`,
-          deviceId: s.offer.deviceId,
-        }));
+        .filter((s) => !s.peer && (!s.local || s.answer !== null))
+        .map((s) => {
+          const peer = s.local ? s.answer! : s.offer;
+          return {
+            offerNonce: s.offerNonce,
+            user: `${normalizeUser(peer.claim.name)}@${addressSegment(peer.deviceName)}`,
+            deviceId: peer.deviceId,
+            local: s.local,
+          };
+        });
       sendJson(res, 200, pending);
     },
   },

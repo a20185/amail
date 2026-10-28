@@ -55,8 +55,13 @@ async function handleDeliver(ctx: RouteCtx): Promise<void> {
 
   // parts 与 envelope.attachments 一一对应：缺失/多余即 422。
   // 必须在幂等去重之前判定，否则「先 200 后幂等吞掉补投」会掩盖不完整载荷。
+  // 重复 id 同样 422：等长排序比较会放行 [x,x] vs [x,x]，落库时同主键冲突 → 500。
   const declaredIds = envelope.attachments.map((a) => a.id).sort();
   const partIds = parts.map((p) => p.id).sort();
+  if (new Set(declaredIds).size !== declaredIds.length || new Set(partIds).size !== partIds.length) {
+    sendJson(res, 422, { error: "duplicate-parts", id: envelope.id });
+    return;
+  }
   if (
     declaredIds.length !== partIds.length ||
     declaredIds.some((id, i) => id !== partIds[i])

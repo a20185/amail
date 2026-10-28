@@ -378,6 +378,52 @@ describe("mirror routes: 回环专属面与上行归属", () => {
     expect(snapAfter.hwm).toBe(0);
   });
 
+  it("合法挂载者 detach 后迟到上行 → 409：缓冲不重建、不扇出", async () => {
+    const { a, b, wsId } = await memberWorkspace("amail-mirror-late-");
+
+    // 成员 B 合法挂载（审计事件 actor=B → 投影 attached[] 记录 B 的挂载）
+    const attach = makeEvent(b.identity.signPrivPem, b.address, "session.attach", {
+      sessionId: "s-late",
+      cli: "claude-code",
+      cwd: "/tmp",
+    });
+    expect((await signedFetchTo(b, a, `/ws/${wsId}/events`, { method: "POST", body: attach })).status).toBe(201);
+
+    // 合法挂载者上行成功（缓冲 hwm=1）
+    const raw = { t: new Date().toISOString(), sessionId: "s-late", text: "mounted" };
+    const ok = await signedFetchTo(b, a, `/ws/${wsId}/mirror/s-late/event`, { method: "POST", body: raw });
+    expect(ok.status).toBe(201);
+
+    // 订阅「仅新事件」（after=1 = 当前 hwm），用于断言迟到事件不扇出
+    const pump = await openMirrorSse(a, wsId, 1);
+
+    // 同一合法挂载者 detach（携来源 attachEventId）→ 投影摘除挂载、缓冲清空
+    const detach = makeEvent(b.identity.signPrivPem, b.address, "session.detach", {
+      sessionId: "s-late",
+      attachEventId: attach.eventId,
+    });
+    expect((await signedFetchTo(b, a, `/ws/${wsId}/events`, { method: "POST", body: detach })).status).toBe(201);
+
+    // 迟到事件：actor 曾是合法挂载者，但当前无挂载 → 409，不重建缓冲
+    const late = await signedFetchTo(b, a, `/ws/${wsId}/mirror/s-late/event`, {
+      method: "POST",
+      body: { ...raw, text: "late-after-legit-detach" },
+    });
+    expect(late.status).toBe(409);
+    expect(((await late.json()) as { error: string }).error).toBe("not-attached");
+
+    const snap = (await (
+      await signedFetch(a, `/ws/${wsId}/mirror/s-late/snapshot`)
+    ).json()) as { events: unknown[]; hwm: number };
+    expect(snap.events).toEqual([]);
+    expect(snap.hwm).toBe(1);
+
+    // 观测窗口：验证「不扇出」必须有界等待
+    await new Promise((r) => setTimeout(r, 250));
+    expect(pump.events).toEqual([]);
+    await pump.close();
+  });
+
   it("房主崩溃重启：启动清理自身幽灵挂载（提交 detach，缓冲不复活）", async () => {
     const a = await startNode("amail-mirror-ghost-a-", "Alice");
     handles.push(a);

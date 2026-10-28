@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { baseUrl, fakeMdns, pairDual, postJson, refreshMdns, startDual, until, ROUTES_DIR } from "../e2e-kit.js";
+import { baseUrl, enableFakeDiscovery, fakeMdns, pairDual, postJson, startDual, until, ROUTES_DIR } from "../e2e-kit.js";
 import { startDaemon, type DaemonHandle } from "../server.js";
 import { resetDeliveryConfig, scanOutbox } from "../../core/delivery.js";
 import { get as getMessage } from "../../core/store.js";
@@ -146,6 +146,28 @@ describe("e2e LAN 直投（双 daemon + fake mdns）", () => {
     expect(getMessage(b.db, req.envelope.id)?.id).toBe(req.envelope.id);
   });
 
+  it("重复附件 ID（envelope 与 parts 均重复且等长）→ 422 落库前拒绝，不 500", async () => {
+    const { a, b, addrA, addrB } = await dual("dup-ids");
+    const dupId = "att_01M61CHRC25BCYH10EHVCHSPRE";
+    const req = buildDeliverReq(a.identity, b.identity, {
+      fromAddr: addrA,
+      toAddr: addrB,
+      attachments: [
+        { id: dupId, name: "a.bin", bytes: Buffer.from("aaaa") },
+        { id: dupId, name: "a-copy.bin", bytes: Buffer.from("aaaa") },
+      ],
+    });
+    // 排序比较对 [x,x] 无感，修复前会两次 INSERT 同主键 → 500
+    expect(req.envelope.attachments.map((x) => x.id)).toEqual([dupId, dupId]);
+    expect(req.parts.map((x) => x.id)).toEqual([dupId, dupId]);
+
+    const res = await postJson<{ error: string }>(baseUrl(b), "/v1/deliver", req);
+    expect(res.status).toBe(422);
+    expect(res.json.error).toBe("duplicate-parts");
+    expect(getMessage(b.db, req.envelope.id)).toBeUndefined();
+    expect(attachmentsOf(b, req.envelope.id)).toEqual([]);
+  });
+
   it("密封体 attachmentIds 与信封不一致 → 422 且不落库", async () => {
     const { a, b, addrA, addrB } = await dual("sealed-ids");
     const req = buildDeliverReq(a.identity, b.identity, {
@@ -251,7 +273,7 @@ describe("e2e LAN 直投（双 daemon + fake mdns）", () => {
     // B 恢复（新随机端口）→ fake mdns 刷新 → 扫描重试
     const revived = await startDaemon({ port: 0, dirs: bDirs, routesDir: ROUTES_DIR, mdns: fakeMdns });
     handles.push(revived);
-    refreshMdns(a, revived);
+    enableFakeDiscovery();
     // 模拟退避到期（30s 扫描周期触发点）
     a.db
       .prepare("UPDATE outbox SET next_retry_at = ? WHERE payload_json LIKE ? AND state = 'queued'")

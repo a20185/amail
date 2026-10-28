@@ -147,6 +147,82 @@ describe("exportArchive", () => {
     expect(existsSync(attDir) ? readdirSync(attDir) : []).toEqual([]);
   });
 
+  it("247 字符长名可归档：落盘名按字节截断（≤200），元数据保留原名", () => {
+    const { home, dirs } = setup();
+    const archiveDir = join(home, "archive");
+    const repo = join(home, "repo");
+    mkdirSync(repo);
+    writeFileSync(
+      join(dirs.projectsDir, "acme.json"),
+      JSON.stringify({ name: "Acme", repos: [repo], archiveDir }),
+    );
+    const db = openStore(dirs.storePath);
+    const blob = join(dirs.attachmentsDir, "long.bin");
+    mkdirSync(dirs.attachmentsDir, { recursive: true });
+    writeFileSync(blob, "long-bytes");
+
+    const longName = `${"a".repeat(243)}.bin`; // 247 字符
+    const env = envelope({
+      attachments: [{ id: "att_01M61A7ADP7K8BHXT1DR1Y9E7T", name: longName, sha256: "c".repeat(64), size: 10 }],
+    });
+    saveInbound(
+      db,
+      env,
+      { body: "x", attachments: [{ id: "att_01M61A7ADP7K8BHXT1DR1Y9E7T", blobPath: blob }] },
+      { sigValid: true },
+    );
+
+    const mdPath = exportArchive(dirs, db, env.id, "acme");
+    const attDir = join(archiveDir, "attachments", env.id);
+    const files = readdirSync(attDir);
+    expect(files).toHaveLength(1);
+    const stored = files[0]!;
+    expect(Buffer.byteLength(stored, "utf8")).toBeLessThanOrEqual(200);
+    expect(stored.startsWith("cccccccc-")).toBe(true);
+    expect(readFileSync(join(attDir, stored), "utf8")).toBe("long-bytes");
+    // 原名完整保留在正文元数据
+    expect(readFileSync(mdPath, "utf8")).toContain(longName);
+  });
+
+  it("中文长名按 UTF-8 字节截断，不截断多字节字符中途", () => {
+    const { home, dirs } = setup();
+    const archiveDir = join(home, "archive");
+    const repo = join(home, "repo");
+    mkdirSync(repo);
+    writeFileSync(
+      join(dirs.projectsDir, "acme.json"),
+      JSON.stringify({ name: "Acme", repos: [repo], archiveDir }),
+    );
+    const db = openStore(dirs.storePath);
+    const blob = join(dirs.attachmentsDir, "cn.bin");
+    mkdirSync(dirs.attachmentsDir, { recursive: true });
+    writeFileSync(blob, "cn-bytes");
+
+    const longName = `${"测试".repeat(100)}.txt`; // 600+ 字节
+    const env = envelope({
+      attachments: [{ id: "att_01M61A7ADP7K8BHXT1DR1Y9E7V", name: longName, sha256: "d".repeat(64), size: 8 }],
+    });
+    saveInbound(
+      db,
+      env,
+      { body: "x", attachments: [{ id: "att_01M61A7ADP7K8BHXT1DR1Y9E7V", blobPath: blob }] },
+      { sigValid: true },
+    );
+
+    const mdPath = exportArchive(dirs, db, env.id, "acme");
+    const attDir = join(archiveDir, "attachments", env.id);
+    const files = readdirSync(attDir);
+    expect(files).toHaveLength(1);
+    const stored = files[0]!;
+    expect(Buffer.byteLength(stored, "utf8")).toBeLessThanOrEqual(200);
+    expect(stored).not.toContain("\uFFFD");
+    // 合法 UTF-8：编码回读与落盘名全等（半个字符会变成替换符）
+    expect(Buffer.from(stored, "utf8").toString("utf8")).toBe(stored);
+    expect(stored.startsWith("dddddddd-测试")).toBe(true);
+    expect(readFileSync(join(attDir, stored), "utf8")).toBe("cn-bytes");
+    expect(readFileSync(mdPath, "utf8")).toContain(longName);
+  });
+
   it("未知 project / 未知 message 抛错", () => {
     const { dirs } = setup();
     const db = openStore(dirs.storePath);

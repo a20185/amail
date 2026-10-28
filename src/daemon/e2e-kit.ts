@@ -6,14 +6,15 @@ import { resolveDirs } from "../core/paths.js";
 import { expect } from "vitest";
 import { configureDelivery } from "../core/delivery.js";
 import { startDaemon, type DaemonHandle } from "./server.js";
-import type { MdnsDeps } from "./mdns.js";
+import { browsePeers, createFakeResponder, type MdnsDeps } from "./mdns.js";
 import type { PairConfirmSig } from "../contract/pair.js";
 
 /** 路由目录 = 本模块兄弟（进程内真路由发现，不依赖构建产物） */
 export const ROUTES_DIR = fileURLToPath(new URL("./routes", import.meta.url));
 
-/** fake mDNS 广播：测试不发真组播（assert 广播接线时注入自定义实现） */
-export const fakeMdns: MdnsDeps = { advertiseImpl: async () => ({ end: async () => {} }) };
+/** fake mDNS responder：测试不发真组播；广播写入的注册表供生产 browse 路径读取 */
+export const fakeResponder = createFakeResponder();
+export const fakeMdns: MdnsDeps = { responder: fakeResponder };
 
 /** 测试内禁用真实桌面通知（AMAIL_NOTIFY_CMD 覆盖） */
 process.env.AMAIL_NOTIFY_CMD ||= ":";
@@ -60,22 +61,19 @@ export async function startNode(tag: string, name: string): Promise<DaemonHandle
   return handle;
 }
 
-/** fake mDNS：双端互见（B 重启换端口后调用 refreshMdns 刷新缓存） */
-export function refreshMdns(a: DaemonHandle, b: DaemonHandle): void {
-  const adv = (h: DaemonHandle) => ({
-    name: `amail-${h.identity.deviceId}`,
-    host: "127.0.0.1",
-    port: h.port,
-    txt: { fp: h.identity.deviceId, user: h.address, ver: "test" },
-  });
-  configureDelivery({ browse: async () => [adv(a), adv(b)] });
+/**
+ * 启用 fake responder 下的发现链路：交付解析走生产 browsePeers 路径读同一注册表
+ * （daemon 启动时经生产 advertise 写入，stop 时撤销；无需手工造发现记录）。
+ */
+export function enableFakeDiscovery(): void {
+  configureDelivery({ browse: async () => browsePeers(1_000, { responder: fakeResponder }) });
 }
 
 /** 两套 AMAIL_HOME 沙箱 + 双随机端口 daemon + fake mdns */
 export async function startDual(tag: string): Promise<DualSandbox> {
   const a = await startNode(`${tag}-a-`, "Alice");
   const b = await startNode(`${tag}-b-`, "Bob");
-  refreshMdns(a, b);
+  enableFakeDiscovery();
   return { a, b, addrA: a.address, addrB: b.address };
 }
 

@@ -24,11 +24,69 @@ export interface AdvertiseService {
   txt: Record<string, string>;
 }
 
-export interface MdnsDeps {
-  /** 注入 fake 实现避免真发组播（测试） */
-  advertiseImpl?: (service: AdvertiseService) => Promise<AdvertiseHandle>;
-  browseImpl?: (timeoutMs: number) => Promise<PeerAdvertisement[]>;
+/**
+ * mDNS responder：广播 + 浏览的唯一底座。
+ * 生产实现走 ciao（广播）/ dgram 查询（浏览）；测试注入 fake 后不发任何真组播，
+ * 广播写入的内存注册表可被同一 responder 的 browse 读到（发现链路全走生产代码）。
+ */
+export interface MdnsResponder {
+  advertise(service: AdvertiseService): Promise<AdvertiseHandle>;
+  browse(timeoutMs: number): Promise<PeerAdvertisement[]>;
+  /** 取消路径：广播超时/停机时尽力关闭底层 responder */
+  shutdown?(): Promise<void>;
 }
+
+/** 广播超时（ciao 探测失败会无限递归重试，不得阻塞 daemon 启动） */
+export const ADVERTISE_TIMEOUT_MS = 3_000;
+
+export class AdvertiseTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`mDNS advertise timed out after ${timeoutMs}ms`);
+    this.name = "AdvertiseTimeoutError";
+  }
+}
+
+export interface MdnsDeps {
+  /** 注入 fake responder（测试）；缺省真发/真查组播 */
+  responder?: MdnsResponder;
+  /** 广播超时覆盖（测试注入短值） */
+  advertiseTimeoutMs?: number;
+}
+
+/**
+ * 测试用 fake responder：不发组播，仅维护内存注册表。
+ * browse 返回 host=127.0.0.1（进程内 daemon 均在回环可达）。
+ */
+export function createFakeResponder(): MdnsResponder & { shutdownCount(): number } {
+  const registry = new Map<string, PeerAdvertisement>();
+  let shutdowns = 0;
+  return {
+    async advertise(service) {
+      registry.set(service.name, {
+        name: service.name,
+        host: "127.0.0.1",
+        port: service.port,
+        txt: { ...service.txt },
+      });
+      return {
+        async end() {
+          registry.delete(service.name);
+        },
+      };
+    },
+    async browse() {
+      return [...registry.values()];
+    },
+    async shutdown() {
+      shutdowns += 1;
+      registry.clear();
+    },
+    shutdownCount() {
+      return shutdowns;
+    },
+  };
+}
+
 
 async function ciaoAdvertise(service: AdvertiseService): Promise<AdvertiseHandle> {
   const { getResponder } = await import("@homebridge/ciao"); // 运行时可选依赖，仅真广播时加载
@@ -48,7 +106,7 @@ async function ciaoAdvertise(service: AdvertiseService): Promise<AdvertiseHandle
   };
 }
 
-/** mDNS 广播：_amail._tcp，TXT {fp, user, ver} */
+/** mDNS 广播：_amail._tcp，TXT {fp, user, ver}；超时即失败（调用方降级继续，不得阻塞启动） */
 export async function advertise(dirs: Dirs, port: number, deps: MdnsDeps = {}): Promise<AdvertiseHandle> {
   const identity = loadOrCreateIdentity(dirs);
   const service: AdvertiseService = {
@@ -62,8 +120,24 @@ export async function advertise(dirs: Dirs, port: number, deps: MdnsDeps = {}): 
       ver: DAEMON_VERSION,
     },
   };
-  const impl = deps.advertiseImpl ?? ciaoAdvertise;
-  return impl(service);
+  const responder = deps.responder ?? defaultResponder;
+  const timeoutMs = deps.advertiseTimeoutMs ?? ADVERTISE_TIMEOUT_MS;
+  const pending = responder.advertise(service);
+  const { promise: timeout, reject: onTimeout } = Promise.withResolvers<never>();
+  const timer = setTimeout(() => onTimeout(new AdvertiseTimeoutError(timeoutMs)), timeoutMs);
+  timer.unref?.();
+  try {
+    return await Promise.race([pending, timeout]);
+  } catch (err) {
+    if (err instanceof AdvertiseTimeoutError) {
+      // 取消路径：迟到的广播成功立即撤销；底层 responder 尽力关闭（ciao 的重试循环随之终止）
+      void pending.then((handle) => handle.end()).catch(() => {});
+      void responder.shutdown?.().catch(() => {});
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---- 最小 mDNS 查询器（legacy unicast：源端口非 5353，id 非 0） ----
@@ -209,8 +283,22 @@ async function browseWithDgram(timeoutMs: number): Promise<PeerAdvertisement[]> 
   return promise;
 }
 
+/** 生产 responder：ciao 广播 + dgram 浏览 */
+const defaultResponder: MdnsResponder = {
+  advertise: ciaoAdvertise,
+  browse: browseWithDgram,
+  async shutdown() {
+    try {
+      const { getResponder } = await import("@homebridge/ciao");
+      await getResponder().shutdown();
+    } catch {
+      // 可选依赖缺失或已关闭：取消路径尽力而为
+    }
+  },
+};
+
 /** 浏览局域网 amail 对端，收集到 timeoutMs 为止 */
 export async function browsePeers(timeoutMs: number, deps: MdnsDeps = {}): Promise<PeerAdvertisement[]> {
-  const impl = deps.browseImpl ?? browseWithDgram;
-  return impl(timeoutMs);
+  const responder = deps.responder ?? defaultResponder;
+  return responder.browse(timeoutMs);
 }

@@ -4,7 +4,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveDirs } from "../core/paths.js";
 import { loadOrCreateIdentity } from "../core/identity.js";
-import { advertise, browsePeers, parseResponse, type AdvertiseService, type PeerAdvertisement } from "./mdns.js";
+import {
+  AdvertiseTimeoutError,
+  advertise,
+  browsePeers,
+  createFakeResponder,
+  parseResponse,
+  type AdvertiseService,
+  type MdnsResponder,
+  type PeerAdvertisement,
+} from "./mdns.js";
 
 function dnsName(name: string): Buffer {
   const labels = name.replace(/\.$/, "").split(".");
@@ -41,16 +50,19 @@ function sandbox() {
   return resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-mdns-")) });
 }
 
-describe("mDNS advertise（fake 注入，不真发组播）", () => {
+describe("mDNS advertise（fake responder 注入，不真发组播）", () => {
   it("广播 _amail._tcp 服务，TXT {fp,user,ver}", async () => {
     const dirs = sandbox();
     const identity = loadOrCreateIdentity(dirs);
     const seen: AdvertiseService[] = [];
     let ended = false;
     const handle = await advertise(dirs, 41234, {
-      advertiseImpl: async (service) => {
-        seen.push(service);
-        return { end: async () => void (ended = true) };
+      responder: {
+        advertise: async (service) => {
+          seen.push(service);
+          return { end: async () => void (ended = true) };
+        },
+        browse: async () => [],
       },
     });
     expect(seen).toHaveLength(1);
@@ -63,6 +75,44 @@ describe("mDNS advertise（fake 注入，不真发组播）", () => {
     expect(seen[0]!.name).toBe(`amail-${identity.deviceId}`);
     await handle.end();
     expect(ended).toBe(true);
+  });
+
+  it("广播超时：responder 永不 resolve → 限时 reject 并走取消路径（shutdown）", async () => {
+    const dirs = sandbox();
+    let shutdownCalled = false;
+    const never: MdnsResponder = {
+      advertise: () => Promise.withResolvers<never>().promise,
+      browse: async () => [],
+      async shutdown() {
+        shutdownCalled = true;
+      },
+    };
+    const startedAt = Date.now();
+    const err = await advertise(dirs, 40000, { responder: never, advertiseTimeoutMs: 30 }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(AdvertiseTimeoutError);
+    expect((err as Error).message).toMatch(/timed out after 30ms/);
+    expect(shutdownCalled).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+});
+
+describe("mDNS 发现链路（fake responder 走生产 advertise/browse 路径）", () => {
+  it("advertise(port) → browsePeers 返回该 host/port/TXT；end 后撤销", async () => {
+    const dirs = sandbox();
+    const identity = loadOrCreateIdentity(dirs);
+    const responder = createFakeResponder();
+
+    const handle = await advertise(dirs, 41234, { responder });
+    const ads = await browsePeers(10, { responder });
+    expect(ads).toHaveLength(1);
+    expect(ads[0]).toMatchObject({ name: `amail-${identity.deviceId}`, host: "127.0.0.1", port: 41234 });
+    expect(ads[0]!.txt).toMatchObject({ fp: identity.deviceId, ver: expect.stringMatching(/^\d+\.\d+\.\d+$/) });
+    expect(ads[0]!.txt.user).toMatch(/@/);
+
+    await handle.end();
+    expect(await browsePeers(10, { responder })).toEqual([]);
   });
 });
 
@@ -92,7 +142,12 @@ describe("mDNS browsePeers（fake 注入）", () => {
         txt: { fp: "0123456789abcdef", user: "alice@mbp16", ver: "0.0.1" },
       },
     ];
-    const result = await browsePeers(5, { browseImpl: async () => peers });
+    const result = await browsePeers(5, {
+      responder: {
+        advertise: async () => ({ end: async () => {} }),
+        browse: async () => peers,
+      },
+    });
     expect(result).toEqual(peers);
   });
 });

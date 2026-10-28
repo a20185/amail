@@ -19,6 +19,8 @@ interface PendingOffer {
   offerNonce: string;
   user: string;
   deviceId: string;
+  /** true = 本机发起且已 answer 未 confirm（`--confirm` 复用）；false = 远端待应答 offer */
+  local?: boolean;
 }
 
 interface PairStatus {
@@ -79,12 +81,18 @@ export async function runPair(address: string, options: PairOptions = {}): Promi
   const dirs = resolveDirs(options.env ?? process.env);
   const target: PairTarget = { host: options.host, port: options.port };
 
-  // 应答模式：本机守护进程有来自对端的待应答 offer
+  // 会话复用优先级（两步流程的第二步）：
+  // 1. --confirm 且本机发起的会话已 answer → 直接复用该 nonce（不新建 offer）
+  // 2. 远端 offer 待应答 → 应答模式
+  // 3. --confirm 但无任何可复用会话 → 报错（绝不新建 offer）
   const pending = (await apiFetch(dirs, "/v1/pair/pending")) as PendingOffer[];
-  const toAnswer = pending.find((p) => p.user === address);
+  const toAnswer = pending.find((p) => !p.local && p.user === address);
+  const toConfirm = options.confirm ? pending.find((p) => p.local && p.user === address) : undefined;
 
   let offerNonce: string;
-  if (toAnswer) {
+  if (toConfirm) {
+    offerNonce = toConfirm.offerNonce;
+  } else if (toAnswer) {
     const result = (await apiFetch(dirs, `/v1/pair/local-answer/${encodeURIComponent(toAnswer.offerNonce)}`, {
       method: "POST",
     })) as { answer: PairAnswer; sas: string };
@@ -96,6 +104,11 @@ export async function runPair(address: string, options: PairOptions = {}): Promi
     });
     if (!res.ok) throw new Error(`remote answer failed: ${res.status}`);
     console.log(`SAS: ${result.sas}（与对端比对，一致后 amail pair --confirm）`);
+  } else if (options.confirm) {
+    // --confirm 只推进已显示 SAS 的会话；无会话可复用时不得新建 offer（否则原会话断链）
+    throw new Error(
+      `no pending pairing session with ${address} — run \`amail pair ${address} --host <host> --port <port>\` first`,
+    );
   } else {
     const { offer } = (await apiFetch(dirs, "/v1/pair/local-offer", { method: "POST" })) as {
       offer: PairOffer;

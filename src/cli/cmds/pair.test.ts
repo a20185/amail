@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { DaemonHandle } from "../../daemon/server.js";
 import { userAddress } from "../../daemon/server.js";
 import type { PairConfirmSig, PairOffer } from "../../contract/pair.js";
-import { refreshMdns } from "../../daemon/e2e-kit.js";
+import { enableFakeDiscovery } from "../../daemon/e2e-kit.js";
 
 const stubs: DaemonHandle[] = [];
 
@@ -47,7 +47,7 @@ describe("amail pair / unpair", () => {
     const stubA = await startStub(homeA.home);
     const stubB = await startStub(homeB.home);
     stubs.push(stubA.handle, stubB.handle);
-    refreshMdns(stubA.handle, stubB.handle);
+    enableFakeDiscovery();
 
     // A 先发起 offer 并转发到 B（模拟对端 CLI 已执行发起阶段）
     const { offer } = (await apiFetch(resolveDirs(homeA.env), "/v1/pair/local-offer", {
@@ -106,7 +106,7 @@ describe("amail pair / unpair", () => {
     const stubA = await startStub(homeA.home);
     const stubB = await startStub(homeB.home);
     stubs.push(stubA.handle, stubB.handle);
-    refreshMdns(stubA.handle, stubB.handle);
+    enableFakeDiscovery();
     const dirsA = resolveDirs(homeA.env);
     const dirsB = resolveDirs(homeB.env);
 
@@ -139,7 +139,7 @@ describe("amail pair / unpair", () => {
     const stubA = await startStub(homeA.home);
     const stubB = await startStub(homeB.home);
     stubs.push(stubA.handle, stubB.handle);
-    refreshMdns(stubA.handle, stubB.handle);
+    enableFakeDiscovery();
     const dirsA = resolveDirs(homeA.env);
     const dirsB = resolveDirs(homeB.env);
     const addrA = userAddress(stubA.handle.dirs, stubA.handle.identity);
@@ -203,6 +203,82 @@ describe("amail pair / unpair", () => {
       spy.mockRestore();
     }
   }, 15_000);
+
+  it("发起方两步流程：A 发起并显示 SAS → A --confirm 复用同一 nonce（不新建 offer）", async () => {
+    const homeA = sandboxEnv();
+    const homeB = sandboxEnv();
+    const stubA = await startStub(homeA.home);
+    const stubB = await startStub(homeB.home);
+    stubs.push(stubA.handle, stubB.handle);
+    enableFakeDiscovery();
+    const dirsA = resolveDirs(homeA.env);
+    const addrA = userAddress(stubA.handle.dirs, stubA.handle.identity);
+    const addrB = userAddress(stubB.handle.dirs, stubB.handle.identity);
+
+    // A 第一步（无 --confirm）：发起 offer，B 以 CLI 应答 → 双方显示同一 SAS
+    const firstA = runPair(addrB, { host: "127.0.0.1", port: stubB.handle.port, env: homeA.env });
+    const offerNonceAtB = await waitForPending(resolveDirs(homeB.env), addrA);
+    expect(offerNonceAtB).toMatch(/^poffer_/);
+    const firstB = await runPair(addrA, { host: "127.0.0.1", port: stubA.handle.port, env: homeB.env });
+    const statusA1 = await firstA;
+    expect(statusA1.sas).toMatch(/^\d{6}$/);
+    expect(statusA1.sas).toBe(firstB.sas);
+
+    // A 发起的「已 answer 未 confirm」会话进入 pending（带 nonce），--confirm 据其复用
+    const pendingA = (await apiFetch(dirsA, "/v1/pair/pending")) as Array<{
+      offerNonce: string;
+      user: string;
+      local?: boolean;
+    }>;
+    const localSessions = pendingA.filter((p) => p.local);
+    expect(localSessions).toHaveLength(1);
+    expect(localSessions[0]!.user).toBe(addrB);
+    const nonce = localSessions[0]!.offerNonce;
+    const before = (await apiFetch(dirsA, `/v1/pair/status/${nonce}`)) as { stage: string };
+    expect(before.stage).toBe("answered");
+
+    // A 第二步 --confirm（CLI 入口，不手调 confirm 接口）；B 同时 --confirm 收尾
+    const secondA = runPair(addrB, {
+      host: "127.0.0.1",
+      port: stubB.handle.port,
+      confirm: true,
+      env: homeA.env,
+    });
+    const secondB = await runPair(addrA, {
+      host: "127.0.0.1",
+      port: stubA.handle.port,
+      confirm: true,
+      env: homeB.env,
+    });
+    expect(secondB.stage).toBe("confirmed");
+
+    const statusA2 = await secondA;
+    expect(statusA2.stage).toBe("confirmed");
+    expect(statusA2.peer).toBe(addrB);
+
+    // 原 nonce 推进到 confirmed：新 offer 不会推进原会话 → 证明复用而非新建
+    const after = (await apiFetch(dirsA, `/v1/pair/status/${nonce}`)) as { stage: string };
+    expect(after.stage).toBe("confirmed");
+    expect(await apiFetch(dirsA, "/v1/pair/pending")).toEqual([]);
+  }, 15_000);
+
+  it("发起方 --confirm 无 pending 会话 → 报错且不新建 offer", async () => {
+    const homeA = sandboxEnv();
+    const homeB = sandboxEnv();
+    const stubA = await startStub(homeA.home);
+    const stubB = await startStub(homeB.home);
+    stubs.push(stubA.handle, stubB.handle);
+    const dirsA = resolveDirs(homeA.env);
+    const dirsB = resolveDirs(homeB.env);
+    const addrB = userAddress(stubB.handle.dirs, stubB.handle.identity);
+
+    await expect(
+      runPair(addrB, { host: "127.0.0.1", port: stubB.handle.port, confirm: true, env: homeA.env }),
+    ).rejects.toThrow(/no pending pairing session/);
+    expect(await apiFetch(dirsA, "/v1/pair/pending")).toEqual([]);
+    // 未转发任何 offer：对端无待应答会话
+    expect(await apiFetch(dirsB, "/v1/pair/pending")).toEqual([]);
+  });
 
   it("缺 --host/--port → 报错", async () => {
     const { home, env } = sandboxEnv();

@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ulid } from "ulid";
 import { resolveDirs } from "../core/paths.js";
@@ -13,7 +13,7 @@ import { loadOrCreateIdentity } from "../core/identity.js";
 import { saveInbound } from "../core/store.js";
 import { AliveInfoSchema } from "../contract/api.js";
 import { EnvelopeSchema, type Envelope } from "../contract/envelope.js";
-import { DaemonAlreadyRunningError, startDaemon, type DaemonHandle } from "./server.js";
+import { DaemonAlreadyRunningError, loadUserConfig, startDaemon, type DaemonHandle } from "./server.js";
 import { fakeMdns } from "./e2e-kit.js";
 import type { AdvertiseService } from "./mdns.js";
 
@@ -166,9 +166,12 @@ describe("daemon start/stop", () => {
       dirs,
       routesDir: ROUTES_DIR,
       mdns: {
-        advertiseImpl: async (service) => {
-          services.push(service);
-          return { end: async () => void (ended = true) };
+        responder: {
+          advertise: async (service) => {
+            services.push(service);
+            return { end: async () => void (ended = true) };
+          },
+          browse: async () => [],
         },
       },
     });
@@ -182,6 +185,57 @@ describe("daemon start/stop", () => {
     await handle.stop();
     handles.pop();
     expect(ended).toBe(true);
+  });
+
+  it("mDNS 探测失败不阻塞启动：广播超时仅告警降级，startDaemon 限时返回", async () => {
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-mdns-slow-")) });
+    const warnings: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    });
+    const startedAt = Date.now();
+    let handle: DaemonHandle | undefined;
+    try {
+      handle = await startDaemon({
+        port: 0,
+        dirs,
+        routesDir: ROUTES_DIR,
+        mdns: {
+          // ciao 探测失败等同形态：advertise 永不 resolve
+          responder: { advertise: () => Promise.withResolvers<never>().promise, browse: async () => [] },
+          advertiseTimeoutMs: 30,
+        },
+      });
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(warnings.some((line) => line.includes("mDNS advertise failed"))).toBe(true);
+    handles.push(handle!);
+    expect((await fetch(`http://127.0.0.1:${handle!.port}/alive`)).status).toBe(200);
+  });
+
+  it("端口越界（65536）：config 校验回退合法端口；显式 port 同步抛错也走清理（pid/DB）", async () => {
+    const cfgDirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-badport-cfg-")) });
+    writeFileSync(
+      join(cfgDirs.configDir, "config.json"),
+      JSON.stringify({ version: 1, name: "Alice", email: "a@example.com", port: 65536, notify: false }),
+      "utf8",
+    );
+    const fallback = loadUserConfig(cfgDirs).port;
+    expect(fallback).toBeGreaterThan(0);
+    expect(fallback).toBeLessThanOrEqual(65535);
+
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-badport-")) });
+    const err = await startDaemon({ port: 65536, dirs, routesDir: ROUTES_DIR, mdns: fakeMdns }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RangeError);
+    expect(existsSync(join(dirs.dataDir, "daemon.pid"))).toBe(false);
+    // DB 已关闭：可重新打开
+    const db = openStore(dirs.storePath);
+    db.close();
   });
 
   it("缺省端口读 config.port（--port 未给时）", async () => {
