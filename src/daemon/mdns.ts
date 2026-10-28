@@ -110,6 +110,22 @@ const loadCiao: () => Promise<CiaoLike> = async () =>
   (await import("@homebridge/ciao")) as unknown as CiaoLike;
 
 /**
+ * 测试专用故障注入（AMAIL_MDNS_FAKE=always-fail）：广告永不完成，并像 ciao 1.3.12
+ * 探测退避循环那样留下一个无 unref、不可取消的 ref 定时器——复现"泄漏定时器阻止进程退出"。
+ */
+function faultInjectionResponder(env: NodeJS.ProcessEnv): MdnsResponder | undefined {
+  if (env.AMAIL_MDNS_FAKE !== "always-fail") return undefined;
+  const retry = setInterval(() => {}, 2_000); // 有意不 unref：模拟 ciao 退避重试
+  return {
+    advertise: () =>
+      new Promise<AdvertiseHandle>(() => {
+        void retry;
+      }),
+    browse: async () => [],
+  };
+}
+
+/**
  * ciao responder 包装：首次 advertise 取得的单例实例被记住，取消/停机对**同一实例**
  * shutdown（引用计数 1→0 才真正关闭）。超时后若广播迟到完成，其 handle.end 不再重复减计数。
  */
@@ -157,7 +173,8 @@ export async function advertise(dirs: Dirs, port: number, deps: MdnsDeps = {}): 
       ver: DAEMON_VERSION,
     },
   };
-  const responder = deps.responder ?? createCiaoResponder(deps.loadCiao);
+  const responder =
+    deps.responder ?? faultInjectionResponder(process.env) ?? createCiaoResponder(deps.loadCiao);
   const timeoutMs = deps.advertiseTimeoutMs ?? ADVERTISE_TIMEOUT_MS;
   const pending = responder.advertise(service);
   const { promise: timeout, reject: onTimeout } = Promise.withResolvers<never>();
@@ -167,7 +184,10 @@ export async function advertise(dirs: Dirs, port: number, deps: MdnsDeps = {}): 
     return await Promise.race([pending, timeout]);
   } catch (err) {
     if (err instanceof AdvertiseTimeoutError) {
-      // 取消路径：迟到的广播成功立即撤销；底层 responder 尽力关闭（ciao 的重试循环随之终止）
+      // 取消路径：迟到的广播成功立即撤销；底层 responder 尽力关闭。
+      // 注意 ciao 1.3.12 探测失败时清空 currentProber 并每 2s 递归重试，定时器无 unref、
+      // 外部无法取消，shutdown() 也停不掉它——进程终止靠 daemon 终止路径的显式 process.exit
+      // 兜底（见 cli/cmds/daemon.ts）；升级 ciao 后需复核此假设。
       void pending.then((handle) => handle.end()).catch(() => {});
       void responder.shutdown?.().catch(() => {});
     }

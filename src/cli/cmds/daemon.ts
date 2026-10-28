@@ -171,15 +171,20 @@ export async function runForeground(port?: number, env: NodeJS.ProcessEnv = proc
   if (notice) console.warn(notice);
   const handle = await startDaemon({ port, dirs });
   console.log(`amail daemon listening on [::]:${handle.port} — ${handle.address}`);
-  const { promise, resolve } = Promise.withResolvers<void>();
   const shutdown = () => {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
-    void handle.stop().finally(resolve);
+    // 终止保证：ciao 1.3.12 的探测退避重试定时器无 unref 且不可取消，stop() 后事件循环可能
+    // 仍有泄漏句柄；cleanup 完成（或失败）后一律显式退出，进程必然结束。升级 ciao 需复核。
+    void handle.stop().then(
+      () => process.exit(0),
+      () => process.exit(1),
+    );
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  await promise;
+  // 前台 daemon 的生命周期即进程生命周期：只经信号清理路径的 process.exit 结束
+  await new Promise<void>(() => {});
 }
 
 export default function register(program: Command): void {
@@ -218,6 +223,8 @@ export default function register(program: Command): void {
     .command("stop")
     .description("stop the running daemon")
     .action(async () => {
-      await daemonStop();
+      const stopped = await daemonStop();
+      // 终止路径不依赖事件循环自然清空：一律显式退出（未停到任何进程 → 非零）
+      process.exit(stopped ? 0 : 1);
     });
 }

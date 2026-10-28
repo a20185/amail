@@ -290,6 +290,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     console.error(`[amail] mDNS advertise failed: ${(err as Error).message}`);
   }
 
+  /**
+   * 停机：广播撤销 → disposer → SSE/连接/监听关闭 → db/pid。
+   * 注意 ciao 1.3.12 探测失败的重试定时器不可取消且无 unref，stop() 无法保证事件循环清空；
+   * 进程终止由调用方（前台 daemon 的 SIGTERM/SIGINT 处理）显式 process.exit 兜底。
+   */
   const stop = async (): Promise<void> => {
     try {
       await advertisement?.end();
