@@ -177,6 +177,7 @@ sequenceDiagram
 |---|---|
 | LAN 嗅探 | 正文/附件/handoff 密封；信封头明文（记录的取舍） |
 | 冒名投递 | 仅接受已配对、未吊销 peers 的验签信 |
+| 工作区越权 | `/ws/*` LAN 路由要求 `X-Amail-Sig`：已配对 + 成员 + 请求签名（Date ±10min；join 入口免成员检查但验邀请签名） |
 | 配对 MITM / 冒名 | 6 位 SAS 人眼比对 |
 | 重放 | 信 id 去重（同 id 幂等）+ 签名覆盖 id（伪造新 id 需私钥）+ 仅拒未来信的 ±10min 上界窗（与 72h 出箱重试不冲突） |
 | 端点被攻陷 | 不防（密钥即身份）；止损 = 对端 unpair |
@@ -232,7 +233,7 @@ sequenceDiagram
 
 ### 17.3 准入：邀请信
 
-房主 `amail ws create`（挂本地项目）→ 发内嵌工作区邀请块的信（workspace id + 房主声明 + 房主签名）→ 对端接受即成员（前置：已配对）。成员变更本身是 membership 事件，可审计。
+房主 `amail ws create`（挂本地项目）→ 发内嵌工作区邀请块的信（workspace id + 房主声明 + 房主签名）→ 对端 `POST /ws/:id/join` 提交邀请块与自身设备签名，房主验签后代为生成 membership add 事件（被邀请方入组前不是成员，准入由 join 专用路由完成）→ 即成员（前置：已配对）。成员变更本身是 membership 事件，可审计。
 
 ### 17.4 sessions：显式 attach 的只读镜像
 
