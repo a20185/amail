@@ -226,7 +226,7 @@ sequenceDiagram
 | todo | 事项、优先级、时间范围、状态流转 |
 | artifact | 文件注册：名称/类型/大小/备注/标签 + 内容哈希 |
 | membership | 邀请 / 移除成员 |
-| session.attach / session.detach | 挂入 / 摘出会话镜像 |
+| session.attach / session.detach | 挂入 / 摘出会话镜像；detach 携带来源 attach 的 eventId，投影按它匹配——在途旧 detach 迟到不摘新挂载 |
 
 投影：三个列表 = 事件流的确定性折叠；可导出 markdown（Backlog.md 兼容读法）。
 
