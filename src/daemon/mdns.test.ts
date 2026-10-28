@@ -11,6 +11,8 @@ import {
   createFakeResponder,
   parseResponse,
   type AdvertiseService,
+  type CiaoLike,
+  type CiaoResponderLike,
   type MdnsResponder,
   type PeerAdvertisement,
 } from "./mdns.js";
@@ -48,6 +50,52 @@ function srvPacket(port: number, target = "mbp16.local"): Buffer {
 
 function sandbox() {
   return resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-mdns-")) });
+}
+
+/**
+ * 模拟 ciao 引用计数语义的 fake：getResponder() 每次 ++ 并返回同一单例，
+ * shutdown() 先 --，归零才真正关闭（停止“探测”定时器）。
+ */
+function refCountingCiao(opts: { advertiseResolves: boolean }) {
+  let refs = 0;
+  let getResponderCalls = 0;
+  let probeTicks = 0;
+  let timer: NodeJS.Timeout | undefined;
+  let closedInstance: unknown;
+  const instance: CiaoResponderLike = {
+    createService: () => ({
+      advertise: () => {
+        timer = setInterval(() => void (probeTicks += 1), 5);
+        timer.unref?.();
+        return opts.advertiseResolves ? Promise.resolve() : new Promise<never>(() => {});
+      },
+      end: async () => {},
+    }),
+    async shutdown() {
+      refs -= 1;
+      if (refs > 0) return;
+      closedInstance = instance;
+      clearInterval(timer);
+      timer = undefined;
+    },
+  };
+  const ciao: CiaoLike = {
+    getResponder: () => {
+      getResponderCalls += 1;
+      refs += 1;
+      return instance;
+    },
+  };
+  return {
+    load: async (): Promise<CiaoLike> => ciao,
+    instance,
+    refs: () => refs,
+    getResponderCalls: () => getResponderCalls,
+    probeTicks: () => probeTicks,
+    /** 探测循环是否仍在跑（shutdown 归零后应停止） */
+    probing: () => timer !== undefined,
+    closedInstance: () => closedInstance,
+  };
 }
 
 describe("mDNS advertise（fake responder 注入，不真发组播）", () => {
@@ -95,6 +143,33 @@ describe("mDNS advertise（fake responder 注入，不真发组播）", () => {
     expect((err as Error).message).toMatch(/timed out after 30ms/);
     expect(shutdownCalled).toBe(true);
     expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("广播超时：关闭的是首次取得的同一 ciao 实例，探测循环停止", async () => {
+    const dirs = sandbox();
+    const ciao = refCountingCiao({ advertiseResolves: false });
+    const err = await advertise(dirs, 41234, {
+      loadCiao: ciao.load,
+      advertiseTimeoutMs: 30,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdvertiseTimeoutError);
+    // 取消路径不得二次 getResponder（ciao 引用计数 1→2→1 会漏减，实例永不关闭）
+    expect(ciao.getResponderCalls()).toBe(1);
+    expect(ciao.refs()).toBe(0);
+    expect(ciao.closedInstance()).toBe(ciao.instance);
+    expect(ciao.probing()).toBe(false);
+  });
+
+  it("广播成功：end 释放同一实例（引用计数归零、探测停止）", async () => {
+    const dirs = sandbox();
+    const ciao = refCountingCiao({ advertiseResolves: true });
+    const handle = await advertise(dirs, 41234, { loadCiao: ciao.load });
+    expect(ciao.refs()).toBe(1);
+    await handle.end();
+    expect(ciao.getResponderCalls()).toBe(1);
+    expect(ciao.refs()).toBe(0);
+    expect(ciao.closedInstance()).toBe(ciao.instance);
+    expect(ciao.probing()).toBe(false);
   });
 });
 

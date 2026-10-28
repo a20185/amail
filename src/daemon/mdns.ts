@@ -49,8 +49,26 @@ export class AdvertiseTimeoutError extends Error {
 export interface MdnsDeps {
   /** 注入 fake responder（测试）；缺省真发/真查组播 */
   responder?: MdnsResponder;
+  /** 注入 ciao 模块加载器（测试引用计数语义）；缺省运行时动态 import 可选依赖 */
+  loadCiao?: () => Promise<CiaoLike>;
   /** 广播超时覆盖（测试注入短值） */
   advertiseTimeoutMs?: number;
+}
+
+/** ciao service 最小接口（advertise 探测完成 / end 撤销） */
+export interface CiaoServiceLike {
+  advertise(): Promise<void>;
+  end(): Promise<void>;
+}
+
+/** ciao responder 最小接口：单例由 getResponder() 取，引用计数由 shutdown() 递减 */
+export interface CiaoResponderLike {
+  createService(service: AdvertiseService): CiaoServiceLike;
+  shutdown(): Promise<void>;
+}
+
+export interface CiaoLike {
+  getResponder(): CiaoResponderLike;
 }
 
 /**
@@ -87,22 +105,41 @@ export function createFakeResponder(): MdnsResponder & { shutdownCount(): number
   };
 }
 
+/** 动态加载 ciao（可选运行时依赖，仅真广播时加载） */
+const loadCiao: () => Promise<CiaoLike> = async () =>
+  (await import("@homebridge/ciao")) as unknown as CiaoLike;
 
-async function ciaoAdvertise(service: AdvertiseService): Promise<AdvertiseHandle> {
-  const { getResponder } = await import("@homebridge/ciao"); // 运行时可选依赖，仅真广播时加载
-  const responder = getResponder();
-  const advertised = responder.createService({
-    name: service.name,
-    type: service.type,
-    port: service.port,
-    txt: service.txt,
-  });
-  await advertised.advertise();
+/**
+ * ciao responder 包装：首次 advertise 取得的单例实例被记住，取消/停机对**同一实例**
+ * shutdown（引用计数 1→0 才真正关闭）。超时后若广播迟到完成，其 handle.end 不再重复减计数。
+ */
+function createCiaoResponder(load: () => Promise<CiaoLike> = loadCiao): MdnsResponder {
+  let instance: CiaoResponderLike | undefined;
+  let released: CiaoResponderLike | undefined;
+
+  async function shutdown(): Promise<void> {
+    const current = instance;
+    instance = undefined;
+    released = current;
+    await current?.shutdown();
+  }
+
   return {
-    async end() {
-      await advertised.end();
-      await responder.shutdown();
+    async advertise(service) {
+      const ciao = await load();
+      const responder = (instance ??= ciao.getResponder());
+      const advertised = responder.createService(service);
+      await advertised.advertise();
+      return {
+        async end() {
+          await advertised.end();
+          if (released === responder) return; // 取消路径已关闭同一实例，勿重复 shutdown
+          await shutdown();
+        },
+      };
     },
+    browse: browseWithDgram,
+    shutdown,
   };
 }
 
@@ -120,7 +157,7 @@ export async function advertise(dirs: Dirs, port: number, deps: MdnsDeps = {}): 
       ver: DAEMON_VERSION,
     },
   };
-  const responder = deps.responder ?? defaultResponder;
+  const responder = deps.responder ?? createCiaoResponder(deps.loadCiao);
   const timeoutMs = deps.advertiseTimeoutMs ?? ADVERTISE_TIMEOUT_MS;
   const pending = responder.advertise(service);
   const { promise: timeout, reject: onTimeout } = Promise.withResolvers<never>();
@@ -283,22 +320,8 @@ async function browseWithDgram(timeoutMs: number): Promise<PeerAdvertisement[]> 
   return promise;
 }
 
-/** 生产 responder：ciao 广播 + dgram 浏览 */
-const defaultResponder: MdnsResponder = {
-  advertise: ciaoAdvertise,
-  browse: browseWithDgram,
-  async shutdown() {
-    try {
-      const { getResponder } = await import("@homebridge/ciao");
-      await getResponder().shutdown();
-    } catch {
-      // 可选依赖缺失或已关闭：取消路径尽力而为
-    }
-  },
-};
-
 /** 浏览局域网 amail 对端，收集到 timeoutMs 为止 */
 export async function browsePeers(timeoutMs: number, deps: MdnsDeps = {}): Promise<PeerAdvertisement[]> {
-  const responder = deps.responder ?? defaultResponder;
+  const responder = deps.responder ?? createCiaoResponder(deps.loadCiao);
   return responder.browse(timeoutMs);
 }
