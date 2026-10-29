@@ -47,7 +47,7 @@ flowchart LR
 
 ## 4. 身份与地址
 
-- **设备密钥**：Ed25519（node:crypto），落数据目录 `keys/`，权限 0600。指纹 = sha256(pubkey) 前 16 hex，`/alive`、配对、`amail identity` 均展示。
+- **设备密钥**：单一 32B 种子落数据目录 `keys/`（0600），派生**两对密钥——Ed25519（签名）与 X25519（加密）**；配对时两公钥一并交换。指纹 = sha256(签名公钥) 前 16 hex，`/alive`、配对、`amail identity` 均展示。
 - **用户声明**：`{name, email}` + 设备密钥签名；`setup` 时读 git config（全局优先，仓级兜底）供确认修改。声明随信封携带。
 - **地址**：`人名@设备名`。设备名取主机名（mDNS instance 冲突时自动加序号，地址随实际名）。多设备即多地址；换机 = 新设备重新 setup + 配对 + unpair 旧设备。
 
@@ -93,9 +93,9 @@ messages(id PK, direction, from_addr, to_addr, subject, in_reply_to,
          project, body, handoff_json, sig_valid)
 attachments(id PK, message_id, name, sha256, size, blob_path)
 receipts(message_id, kind, at)
-peers(device_id PK, device_name, user_name, user_email, pubkey_pem,
-      paired_at, revoked_at)
-outbox(id PK, envelope_json, attempts, next_retry_at, last_error,
+peers(device_id PK, device_name, user_name, user_email,
+      sign_pub_pem, enc_pub_pem, paired_at, revoked_at)
+outbox(id PK, payload_json(DeliverReq 完整序列化), attempts, next_retry_at, last_error,
        created_at, expires_at)
 meta(key PK, value)   -- device_id、schema 版本
 ```
@@ -122,10 +122,11 @@ sequenceDiagram
 
 - SAS 取 `sha256(min(pkA,pkB) ‖ max(pkA,pkB))` 前 20 bit 映射 6 位十进制；两端同式派生，无第三方。
 - 未确认的 offer 60s 过期；`amail unpair` 即吊销（`revoked_at`），此后拒收并退信。
+- 确认签名晚于 SAS 比对：offer/answer 均不携带确认签名；比对一致后双方各自提交对 `(offerNonce‖answerNonce‖deviceId_A‖deviceId_B)` 的签名，各自收齐双签才落盘 peers（含签名/加密双公钥）。
 
 ## 8. 投递协议
 
-- `POST http://<peer>:<port>/v1/deliver`，载荷 = §5 信封。对端处理序：源 IP 无要求 → 验签（发件设备须在 peers 白名单且未吊销）→ 时间窗（`createdAt` ±10min）→ id 去重 → 解封 → 附件校验落盘 → 同事务写 messages/attachments → 200 `{deliveredAt}`。
+- `POST http://<peer>:<port>/v1/deliver`，载荷 = §5 投递载荷（信封+密封附件 parts）。对端处理序：源 IP 无要求 → 验签（发件设备须在 peers 白名单且未吊销）→ 时间窗（**仅拒未来信：createdAt > now+10min 即拒；不设下限**）→ id 去重 → 解封 → 附件校验落盘 → 同事务写 messages/attachments → 200 `{deliveredAt}`。
 - 失败/离线 → **出箱**：指数退避（30s 起 ×2，上限 1h），默认 72h 过期；过期退回发件人（本地标记 + 桌面通知）。
 - `POST /v1/receipt` `{messageId, kind, at, sig}`：read 回执通道。
 - 所有对端请求带发件设备签名；信封格式与传输无关（未来跨网可换 iroh 承载，信封语义不动）。
@@ -134,7 +135,7 @@ sequenceDiagram
 
 - **单口双面**，默认 `:36969`（可配；mDNS 广播实际端口，发现不依赖固定口）。
 - LAN 面：`GET /alive`（`{user, deviceName, fingerprint, version}`，配对前公开可读）；`POST /v1/deliver`、`POST /v1/receipt`、`POST /v1/pair/*`。
-- 回环面（源地址非 127.0.0.1 一律 403）：`GET /v1/inbox?project=&unread=`、`GET /v1/message/:id`、`POST /v1/send`、`POST /v1/archive`、`GET /v1/events`（SSE：new-mail / receipt / outbox 变更）、`GET /v1/status`。
+- 回环面（源地址非规范化 loopback——127.0.0.0/8、::1、v4-mapped 之外——一律 403；daemon 监听 0.0.0.0 与 :: 供 LAN 面，隔离靠源地址判定）：`GET /v1/inbox?project=&unread=`、`GET /v1/message/:id`、`POST /v1/send`、`POST /v1/archive`、`GET /v1/events`（SSE：new-mail / receipt / outbox 变更）、`GET /v1/status`。
 - 新信 → 桌面通知（macOS `osascript` / Linux `notify-send`，零依赖）+ SSE 推送。
 - 生命周期：`amail daemon` 前台；`amail daemon install` 装 launchd LaunchAgent / systemd `--user` 单元；pid 文件单实例锁。
 
@@ -176,8 +177,9 @@ sequenceDiagram
 |---|---|
 | LAN 嗅探 | 正文/附件/handoff 密封；信封头明文（记录的取舍） |
 | 冒名投递 | 仅接受已配对、未吊销 peers 的验签信 |
+| 工作区越权 | `/ws/*` LAN 路由要求 `X-Amail-Sig`：已配对 + 成员 + 请求签名（Date ±10min；join 入口免成员检查但验邀请签名） |
 | 配对 MITM / 冒名 | 6 位 SAS 人眼比对 |
-| 重放 | 信 id 去重 + createdAt ±10min 时间窗 |
+| 重放 | 信 id 去重（同 id 幂等）+ 签名覆盖 id（伪造新 id 需私钥）+ 仅拒未来信的 ±10min 上界窗（与 72h 出箱重试不冲突） |
 | 端点被攻陷 | 不防（密钥即身份）；止损 = 对端 unpair |
 | mDNS 泛洪 / DoS | 不防，v1 明示 |
 
@@ -217,7 +219,7 @@ sequenceDiagram
 
 ### 17.2 事件模型
 
-事件 = `{seq（房主序）, actor（成员设备）, kind, payload, at, sig（提交设备签名）}`：
+事件 = `{seq（房主序）, eventId, actor（成员设备）, kind, payload, at, sig（提交设备签名）}`；**签名覆盖 {eventId, actor, kind, payload, at}（不含 seq；eventId 供房主幂等去重）——成员以无序形提交，房主验签后分配 seq，完整定序事件才入库与广播**：
 
 | kind | payload 要点 |
 |---|---|
@@ -225,19 +227,19 @@ sequenceDiagram
 | todo | 事项、优先级、时间范围、状态流转 |
 | artifact | 文件注册：名称/类型/大小/备注/标签 + 内容哈希 |
 | membership | 邀请 / 移除成员 |
-| session.attach / session.detach | 挂入 / 摘出会话镜像 |
+| session.attach / session.detach | 挂入 / 摘出会话镜像；detach 携带来源 attach 的 eventId，投影按它匹配——在途旧 detach 迟到不摘新挂载 |
 
 投影：三个列表 = 事件流的确定性折叠；可导出 markdown（Backlog.md 兼容读法）。
 
 ### 17.3 准入：邀请信
 
-房主 `amail ws create`（挂本地项目）→ 发内嵌工作区邀请块的信（workspace id + 房主声明 + 房主签名）→ 对端接受即成员（前置：已配对）。成员变更本身是 membership 事件，可审计。
+房主 `amail ws create`（挂本地项目）→ 发内嵌工作区邀请块的信（workspace id + 房主声明 + 房主签名）→ 对端 `POST /ws/:id/join` 提交邀请块与自身设备签名，房主验签后**构造并签署 membership add 事件（actor=房主、payload.member=被邀请方——房主恒为成员可过成员检查；被邀请方入组前不自行提交事件）**经定序落库 → 即成员（前置：已配对）。成员变更本身是 membership 事件，可审计。
 
 ### 17.4 sessions：显式 attach 的只读镜像
 
 - **显式 attach**：经 skill 或 CLI 把本机某活跃 agent 会话挂入 workspace；不自动圈定、不自动上报（隐私边界 = 显式意图）。
 - **只读**：messagelist + codediffs 实时流（SSE），不落库；晚加入者可拉一次当前快照。驾驶延后。
-- 采集适配器：v1 = Claude Code（hooks + session JSONL）、Pi（本地 trace）、OpenCode（service API）；Codex 后补。无适配器的 CLI 无法 attach。
+- 采集适配器：v1 = Claude Code（session JSONL 增量尾随，不装 hooks）、Pi（本地 session jsonl 尾随）、OpenCode（**本地 opencode.db 只读**；service API 列备选——已裁定偏差，理由：无服务依赖、可 fixture 测试）；Codex 后补。无适配器的 CLI 无法 attach。
 
 ### 17.5 artifacts
 
