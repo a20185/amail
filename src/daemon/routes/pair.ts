@@ -22,6 +22,8 @@ interface PairSession {
   answer: PairAnswer | null;
   /** 本端是发起方（offer 由 local-offer 创建）还是应答方（offer 经 LAN 收到） */
   local: boolean;
+  /** 发起方 CLI 声明的对端地址（offer 未 answer 时用于 pending 关联，重跑不新建 offer） */
+  target?: string;
   confirmSigs: Map<string, PairConfirmSig>;
   peer: PeerRecord | null;
   createdAt: number;
@@ -276,11 +278,13 @@ const routes: Route[] = [
     lan: false,
     handler(ctx) {
       const offer = buildOffer(ctx);
+      const to = ctx.body && typeof ctx.body === "object" && "to" in ctx.body ? ctx.body.to : undefined;
       sessions(ctx.db).set(offer.nonce, {
         offerNonce: offer.nonce,
         offer,
         answer: null,
         local: true,
+        target: typeof to === "string" && to ? to : undefined,
         confirmSigs: new Map(),
         peer: null,
         createdAt: Date.now(),
@@ -290,24 +294,31 @@ const routes: Route[] = [
     },
   },
   {
-    // 待推进会话列表（CLI 据此复用刚显示 SAS 的那个 nonce，不新建 offer）：
+    // 待推进会话列表（CLI 据此复用已显示 SAS / 等待应答的那个 nonce，不新建 offer）：
     // - local=false：远端 offer（未 answer + 已 answer 未 confirm）→ 应答方 CLI 转入应答模式
-    // - local=true：本机发起且已 answer 未 confirm → 发起方 CLI 的 --confirm 复用同一会话
+    // - local=true：本机发起的会话（含尚未 answer 的，user 取 CLI 声明的目标地址）→
+    //   发起方 CLI 重跑普通 pair 时显示 SAS 或等待提示，--confirm 时复用同一会话
     method: "GET",
     path: "/v1/pair/pending",
     lan: false,
     handler({ res, db }) {
       const pending = [...sessions(db).values()]
-        .filter((s) => !s.peer && (!s.local || s.answer !== null))
+        .filter((s) => !s.peer)
         .map((s) => {
-          const peer = s.local ? s.answer! : s.offer;
+          // 本机发起且未收到 answer 时无对端身份，只能回填 CLI 声明的目标地址
+          const peer = s.local ? s.answer : s.offer;
+          const user = peer
+            ? `${normalizeUser(peer.claim.name)}@${addressSegment(peer.deviceName)}`
+            : (s.target ?? null);
           return {
             offerNonce: s.offerNonce,
-            user: `${normalizeUser(peer.claim.name)}@${addressSegment(peer.deviceName)}`,
-            deviceId: peer.deviceId,
+            user,
+            deviceId: peer?.deviceId ?? null,
             local: s.local,
+            stage: stageOf(s),
           };
-        });
+        })
+        .filter((item) => item.user !== null);
       sendJson(res, 200, pending);
     },
   },
@@ -372,7 +383,7 @@ const routes: Route[] = [
       }
       sendJson(res, 200, {
         stage: stageOf(session),
-        sas: sasOf(session),
+        sas: sasOf(session) ?? null,
         peer: session.peer ? `${session.peer.user}@${session.peer.device}` : null,
       });
     },

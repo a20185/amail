@@ -44,10 +44,11 @@ amail daemon status
 
 ```sh
 amail peers --scan                              # mDNS 发现局域网设备
-amail pair bob@bob-mbp --host 192.168.1.23 --port 36969
+amail pair bob@bob-mbp                          # host/port 自动由 mDNS 发现解析
+amail pair bob@bob-mbp --host 192.168.1.23 --port 36969   # 显式指定（同机多实例等）
 ```
 
-双方屏幕显示同一 6 位 SAS 后输入确认；`--confirm` 可在 SAS 匹配后直接提交确认签名。配对成功后 `amail peers` 可见对端。
+双方屏幕显示同一 6 位 SAS 后输入确认；`--confirm` 可在 SAS 匹配后直接提交确认签名。发起方重跑 `amail pair <address>` 会复用未完成会话（直接显示待比对 SAS 或提示等待对端应答），不会重建 offer。配对成功后 `amail peers` 可见对端。
 
 **4. 发信 / 收信**：
 
@@ -117,7 +118,7 @@ amail artifact fetch art_01H... -o ./report.pdf
 | `amail project add <slug> [--name <name>] [--repo <path>]… [--archive <dir>]` | 登记项目 |
 | `amail project list` | 列出已登记项目 |
 | `amail peers [--scan]` | 列已配对对端 / mDNS 扫描局域网 |
-| `amail pair <address> --host <host> --port <port> [--confirm]` | 配对（offer/answer/SAS/confirm） |
+| `amail pair <address> [--host <host>] [--port <port>] [--confirm]` | 配对（host/port 缺省经 mDNS 发现；offer/answer/SAS/confirm） |
 | `amail unpair <address>` | 撤销配对 |
 | `amail send <to> --subject <subject> --body <body> [--ref <path>]…` | 发信 |
 | `amail reply <msgId> --body <body> [--ref <path>]…` | 线程回信 |

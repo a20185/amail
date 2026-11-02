@@ -197,6 +197,101 @@ export async function advertise(dirs: Dirs, port: number, deps: MdnsDeps = {}): 
   }
 }
 
+/** 广播失败后台重试的退避序列（毫秒）：10s → 30s → 60s → 120s → 300s 封顶 */
+export const ADVERTISE_RETRY_DELAYS_MS = [10_000, 30_000, 60_000, 120_000, 300_000] as const;
+
+/** 定时器 seam：测试注入手动时钟，不真等退避时长 */
+export interface RetryClock {
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const defaultRetryClock: RetryClock = {
+  setTimeout(fn, ms) {
+    const timer = setTimeout(fn, ms);
+    timer.unref?.();
+    return timer;
+  },
+  clearTimeout(handle) {
+    clearTimeout(handle as NodeJS.Timeout);
+  },
+};
+
+export interface RetryAdvertiseOptions extends MdnsDeps {
+  /** 退避序列覆盖（测试注入毫秒级序列） */
+  delaysMs?: readonly number[];
+  /** 定时器注入（测试用手动时钟） */
+  clock?: RetryClock;
+  /** 重试成功时交付广播句柄（调用方负责停机撤销） */
+  onAdvertised: (handle: AdvertiseHandle) => void;
+}
+
+export interface AdvertiseRetry {
+  /** 取消待定重试；在途尝试收尾（迟到成功立即撤销，不再重试） */
+  stop(): Promise<void>;
+}
+
+/**
+ * mDNS 广播后台重试：首次 advertise 失败后按退避序列反复重试，直到成功或 stop()。
+ * 每次重试都走既有 advertise 路径（含超时/取消语义）；期间守护进程正常服务。
+ */
+export function retryAdvertise(
+  dirs: Dirs,
+  port: number,
+  options: RetryAdvertiseOptions,
+): AdvertiseRetry {
+  const delays = options.delaysMs ?? ADVERTISE_RETRY_DELAYS_MS;
+  const clock = options.clock ?? defaultRetryClock;
+  let stopped = false;
+  let timer: unknown;
+  let inflight: Promise<void> | undefined;
+
+  const schedule = (attempt: number): void => {
+    const delay = delays[Math.min(attempt, delays.length - 1)] ?? 0;
+    timer = clock.setTimeout(() => {
+      timer = undefined;
+      attemptOnce(attempt + 1);
+    }, delay);
+  };
+
+  const attemptOnce = (attempt: number): void => {
+    const run = (async (): Promise<void> => {
+      try {
+        const advertised = await advertise(dirs, port, options);
+        if (stopped) {
+          // 停机竞态：迟到成功的广播立即撤销，避免局域网残留幽灵实例
+          await advertised.end().catch(() => {});
+          return;
+        }
+        options.onAdvertised(advertised);
+        console.warn(`[amail] mDNS advertise recovered after ${attempt} retry attempt(s)`);
+      } catch (err) {
+        if (stopped) return;
+        // 首次失败由 startDaemon 告警；重试失败仅 debug，避免退避期间刷屏
+        console.debug(`[amail] mDNS advertise retry ${attempt} failed: ${(err as Error).message}`);
+        schedule(attempt);
+      }
+    })();
+    inflight = run;
+    void run.then(() => {
+      if (inflight === run) inflight = undefined;
+    });
+  };
+
+  schedule(0);
+
+  return {
+    async stop() {
+      stopped = true;
+      if (timer !== undefined) {
+        clock.clearTimeout(timer);
+        timer = undefined;
+      }
+      await inflight;
+    },
+  };
+}
+
 // ---- 最小 mDNS 查询器（legacy unicast：源端口非 5353，id 非 0） ----
 
 const MDNS_GROUP = "224.0.0.251";

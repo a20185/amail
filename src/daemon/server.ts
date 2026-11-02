@@ -7,8 +7,8 @@ import { openStore } from "../core/db.js";
 import { loadOrCreateIdentity, type DeviceIdentityFull } from "../core/identity.js";
 import { resolveDirs, type Dirs } from "../core/paths.js";
 import { EventBus } from "./sse.js";
-import type { AdvertiseHandle, MdnsDeps } from "./mdns.js";
-import { advertise } from "./mdns.js";
+import type { AdvertiseHandle, AdvertiseRetry, MdnsDeps, RetryClock } from "./mdns.js";
+import { advertise, retryAdvertise } from "./mdns.js";
 import {
   defaultRoutesDir,
   isLoopbackAddress,
@@ -210,6 +210,8 @@ export interface StartDaemonOptions {
   routesDir?: string;
   /** mDNS 广播注入（测试用 fake；缺省真发组播） */
   mdns?: MdnsDeps;
+  /** 广播失败后台重试 seam（测试注入手动时钟/退避序列，不真等） */
+  retry?: { delaysMs?: readonly number[]; clock?: RetryClock };
 }
 
 export interface DaemonHandle extends DaemonCore {
@@ -282,20 +284,30 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
 
-  // mDNS 广播实际端口（发现不依赖固定口）；广播失败不阻断守护进程
+  // mDNS 广播实际端口（发现不依赖固定口）；广播失败不阻断守护进程，转入后台重试
   let advertisement: AdvertiseHandle | undefined;
+  let advertiseRetry: AdvertiseRetry | undefined;
   try {
     advertisement = await advertise(dirs, actualPort, options.mdns);
   } catch (err) {
     console.error(`[amail] mDNS advertise failed: ${(err as Error).message}`);
+    advertiseRetry = retryAdvertise(dirs, actualPort, {
+      ...options.mdns,
+      ...options.retry,
+      onAdvertised: (handle) => {
+        advertisement = handle;
+      },
+    });
   }
 
   /**
-   * 停机：广播撤销 → disposer → SSE/连接/监听关闭 → db/pid。
+   * 停机：取消广播重试 → 广播撤销 → disposer → SSE/连接/监听关闭 → db/pid。
    * 注意 ciao 1.3.12 探测失败的重试定时器不可取消且无 unref，stop() 无法保证事件循环清空；
    * 进程终止由调用方（前台 daemon 的 SIGTERM/SIGINT 处理）显式 process.exit 兜底。
    */
   const stop = async (): Promise<void> => {
+    await advertiseRetry?.stop();
+    advertiseRetry = undefined;
     try {
       await advertisement?.end();
     } catch {
