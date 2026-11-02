@@ -15,7 +15,7 @@ import { AliveInfoSchema } from "../contract/api.js";
 import { EnvelopeSchema, type Envelope } from "../contract/envelope.js";
 import { DaemonAlreadyRunningError, loadUserConfig, startDaemon, type DaemonHandle } from "./server.js";
 import { fakeMdns } from "./e2e-kit.js";
-import type { AdvertiseService } from "./mdns.js";
+import { ADVERTISE_RETRY_DELAYS_MS, type AdvertiseService } from "./mdns.js";
 
 const ROUTES_DIR = fileURLToPath(new URL("./routes", import.meta.url));
 
@@ -45,6 +45,39 @@ function freePort(): Promise<number> {
     srv.close(() => resolve(port));
   });
   return promise;
+}
+
+/** 手动时钟：逐次触发后台重试，断言退避序列而不用真等（不真发组播） */
+function manualClock() {
+  let seq = 0;
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  const delays: number[] = [];
+  return {
+    clock: {
+      setTimeout(fn: () => void, ms: number) {
+        const id = ++seq;
+        timers.set(id, { fn, ms });
+        delays.push(ms);
+        return id;
+      },
+      clearTimeout(handle: unknown) {
+        timers.delete(handle as number);
+      },
+    },
+    delays,
+    pending: () => timers.size,
+    /** 触发最早排定的重试并等其异步收尾（成功/失败排下一轮） */
+    async fireNext(): Promise<void> {
+      const next = timers.entries().next();
+      if (next.done) throw new Error("no pending retry timer");
+      const [id, timer] = next.value;
+      timers.delete(id);
+      timer.fn();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    },
+  };
 }
 
 function inbound(db: DaemonHandle["db"], subject: string) {
@@ -214,6 +247,135 @@ describe("daemon start/stop", () => {
     expect(warnings.some((line) => line.includes("mDNS advertise failed"))).toBe(true);
     handles.push(handle!);
     expect((await fetch(`http://127.0.0.1:${handle!.port}/alive`)).status).toBe(200);
+  });
+
+  it("mDNS 首次失败后台重试：第 2 次成功即停，stop 撤销广播且无遗留定时器", async () => {
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-mdns-retry-ok-")) });
+    const { clock, delays, pending, fireNext } = manualClock();
+    const services: AdvertiseService[] = [];
+    let ended = 0;
+    let attempts = 0;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let handle: DaemonHandle;
+    try {
+      handle = await startDaemon({
+        port: 0,
+        dirs,
+        routesDir: ROUTES_DIR,
+        mdns: {
+          responder: {
+            advertise: async (service) => {
+              services.push(service);
+              attempts += 1;
+              // ciao 探测冲突：首次失败后重试成功
+              if (attempts === 1) throw new Error("probe conflict");
+              return { end: async () => void (ended += 1) };
+            },
+            browse: async () => [],
+          },
+        },
+        retry: { clock },
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+    handles.push(handle!);
+
+    expect(services).toHaveLength(1);
+    expect(delays).toEqual([ADVERTISE_RETRY_DELAYS_MS[0]]);
+    expect(pending()).toBe(1);
+
+    await fireNext();
+    expect(services).toHaveLength(2);
+    expect(services[1]!.port).toBe(handle!.port);
+    expect(pending()).toBe(0); // 成功后不再排重试
+    expect(warnSpy.mock.calls.some((args) => String(args[0]).includes("recovered"))).toBe(true);
+
+    await handle!.stop();
+    handles.pop();
+    expect(ended).toBe(1);
+    expect(pending()).toBe(0);
+    warnSpy.mockRestore();
+  });
+
+  it("mDNS 持续失败：按 10s/30s/60s/120s/300s 退避封顶重试，期间服务正常", async () => {
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-mdns-retry-all-")) });
+    const { clock, delays, pending, fireNext } = manualClock();
+    let attempts = 0;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    let handle: DaemonHandle;
+    try {
+      handle = await startDaemon({
+        port: 0,
+        dirs,
+        routesDir: ROUTES_DIR,
+        mdns: {
+          responder: {
+            advertise: async () => {
+              attempts += 1;
+              throw new Error("probe conflict");
+            },
+            browse: async () => [],
+          },
+        },
+        retry: { clock },
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+    handles.push(handle!);
+
+    expect(attempts).toBe(1);
+    expect(delays).toEqual([ADVERTISE_RETRY_DELAYS_MS[0]]);
+    for (let i = 0; i < 5; i += 1) await fireNext();
+
+    expect(attempts).toBe(6);
+    expect(delays).toEqual([10_000, 30_000, 60_000, 120_000, 300_000, 300_000]);
+    expect(pending()).toBe(1); // 仍在后台重试
+    expect((await fetch(`http://127.0.0.1:${handle!.port}/alive`)).status).toBe(200);
+
+    await handle!.stop();
+    handles.pop();
+    expect(pending()).toBe(0);
+    debugSpy.mockRestore();
+  });
+
+  it("mDNS 降级重试中停机：待定重试被取消，不再触达响应器", async () => {
+    const dirs = resolveDirs({ AMAIL_HOME: mkdtempSync(join(tmpdir(), "amail-mdns-retry-stop-")) });
+    const { clock, pending } = manualClock();
+    let attempts = 0;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let handle: DaemonHandle;
+    try {
+      handle = await startDaemon({
+        port: 0,
+        dirs,
+        routesDir: ROUTES_DIR,
+        mdns: {
+          responder: {
+            advertise: async () => {
+              attempts += 1;
+              throw new Error("probe conflict");
+            },
+            browse: async () => [],
+          },
+        },
+        retry: { clock },
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+    handles.push(handle!);
+
+    expect(attempts).toBe(1);
+    expect(pending()).toBe(1);
+
+    await handle!.stop();
+    handles.pop();
+    expect(pending()).toBe(0);
+    expect(attempts).toBe(1);
   });
 
   it("端口越界（65536）：config 校验回退合法端口；显式 port 同步抛错也走清理（pid/DB）", async () => {
