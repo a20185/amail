@@ -280,10 +280,137 @@ describe("amail pair / unpair", () => {
     expect(await apiFetch(dirsB, "/v1/pair/pending")).toEqual([]);
   });
 
-  it("缺 --host/--port → 报错", async () => {
+  it("缺省 --host/--port：经 mDNS 发现（fake browse 注入）解析后发起配对", async () => {
+    const homeA = sandboxEnv();
+    const homeB = sandboxEnv();
+    const stubA = await startStub(homeA.home);
+    const stubB = await startStub(homeB.home);
+    stubs.push(stubA.handle, stubB.handle);
+    const dirsB = resolveDirs(homeB.env);
+    const addrA = userAddress(stubA.handle.dirs, stubA.handle.identity);
+    // 同机双沙箱的 deviceName 相同，构造与 A 自身不同的对端地址（模拟真实双机）
+    const addrB = "bob@peer-device";
+
+    // 只注入发现结果：instance 名与 TXT fp 一致 → 采信
+    configureDelivery({
+      browse: async () => [
+        {
+          name: `amail-${stubB.handle.identity.deviceId}`,
+          host: "127.0.0.1",
+          port: stubB.handle.port,
+          txt: { fp: stubB.handle.identity.deviceId, user: addrB },
+        },
+      ],
+    });
+
+    const pairing = runPair(addrB, { env: homeA.env });
+    const nonce = await waitForPending(dirsB, addrA);
+    const { answer } = (await apiFetch(dirsB, `/v1/pair/local-answer/${nonce}`, {
+      method: "POST",
+    })) as { answer: unknown };
+    const forwarded = await fetch(`http://127.0.0.1:${stubA.handle.port}/v1/pair/answer/${nonce}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(answer),
+    });
+    expect(forwarded.status).toBe(200);
+    expect((await pairing).sas).toMatch(/^\d{6}$/);
+  }, 10_000);
+
+  it("mDNS 未发现该设备（或指纹不符）→ 报错含提示且不新建 offer", async () => {
     const { home, env } = sandboxEnv();
-    stubs.push((await startStub(home)).handle);
-    await expect(runPair("bob@dev", { env })).rejects.toThrow("--host and --port are required");
+    const stubbed = await startStub(home);
+    stubs.push(stubbed.handle);
+    // TXT user 匹配但 instance 名与 TXT fp 不一致 → 指纹校验失败，不得采信
+    configureDelivery({
+      browse: async () => [
+        { name: "amail-not-the-advertised-fp", host: "127.0.0.1", port: stubbed.handle.port, txt: { fp: "deadbeef", user: "bob@ghost" } },
+      ],
+    });
+    await expect(runPair("bob@ghost", { env })).rejects.toThrow(
+      /未发现该设备[\s\S]*显式指定 --host\/--port/,
+    );
+    expect(await apiFetch(stubbed.dirs, "/v1/pair/pending")).toEqual([]);
+  });
+
+  it("发起方重跑普通 pair：已 answer → 显示 SAS 并复用原 nonce（不新建 offer）", async () => {
+    const homeA = sandboxEnv();
+    const homeB = sandboxEnv();
+    const stubA = await startStub(homeA.home);
+    const stubB = await startStub(homeB.home);
+    stubs.push(stubA.handle, stubB.handle);
+    const dirsA = resolveDirs(homeA.env);
+    const dirsB = resolveDirs(homeB.env);
+    const addrA = userAddress(stubA.handle.dirs, stubA.handle.identity);
+    const addrB = userAddress(stubB.handle.dirs, stubB.handle.identity);
+
+    // 第一步：A 发起，B 应答 → 双方拿到同一 SAS
+    const firstA = runPair(addrB, { host: "127.0.0.1", port: stubB.handle.port, env: homeA.env });
+    const nonce = await waitForPending(dirsB, addrA);
+    const firstB = await runPair(addrA, { host: "127.0.0.1", port: stubA.handle.port, env: homeB.env });
+    const statusA1 = await firstA;
+    expect(statusA1.sas).toBe(firstB.sas);
+
+    // 第二步：A 重跑普通 pair（不带 --confirm）→ 直接显示待确认 SAS，不新建 offer
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    });
+    try {
+      const again = await runPair(addrB, {
+        host: "127.0.0.1",
+        port: stubB.handle.port,
+        env: homeA.env,
+      });
+      expect(again.sas).toBe(statusA1.sas);
+      expect(again.stage).toBe("answered");
+      expect(logged.some((line) => line.includes("SAS:"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // 未新建 offer：A/B 两侧仍只有原会话
+    const pendingA = (await apiFetch(dirsA, "/v1/pair/pending")) as Array<{ offerNonce: string }>;
+    expect(pendingA.map((p) => p.offerNonce)).toEqual([nonce]);
+    const pendingB = (await apiFetch(dirsB, "/v1/pair/pending")) as Array<{ offerNonce: string }>;
+    expect(pendingB.map((p) => p.offerNonce)).toEqual([nonce]);
+  }, 15_000);
+
+  it("发起方重跑普通 pair：仅 offer（未 answer）→ 提示等待对端应答并保留原会话", async () => {
+    const homeA = sandboxEnv();
+    const homeB = sandboxEnv();
+    const stubA = await startStub(homeA.home);
+    const stubB = await startStub(homeB.home);
+    stubs.push(stubA.handle, stubB.handle);
+    const dirsA = resolveDirs(homeA.env);
+    const addrB = userAddress(stubB.handle.dirs, stubB.handle.identity);
+
+    // 已有本机发起的会话（尚未收到 answer），CLI 声明的目标地址用于关联
+    const { offer } = (await apiFetch(dirsA, "/v1/pair/local-offer", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to: addrB }),
+    })) as { offer: PairOffer };
+
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    });
+    try {
+      const status = await runPair(addrB, {
+        host: "127.0.0.1",
+        port: stubB.handle.port,
+        env: homeA.env,
+      });
+      expect(status.stage).toBe("offer");
+      expect(status.sas).toBeNull();
+      expect(logged.some((line) => line.includes("等待对端应答"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const pendingA = (await apiFetch(dirsA, "/v1/pair/pending")) as Array<{ offerNonce: string }>;
+    expect(pendingA.map((p) => p.offerNonce)).toEqual([offer.nonce]);
   });
 
   it("amail unpair：吊销已配对地址；未配对返回 false", async () => {
