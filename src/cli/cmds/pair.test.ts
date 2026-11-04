@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { DaemonHandle } from "../../daemon/server.js";
 import { userAddress } from "../../daemon/server.js";
 import type { PairConfirmSig, PairOffer } from "../../contract/pair.js";
-import { enableFakeDiscovery } from "../../daemon/e2e-kit.js";
+import { enableFakeDiscovery, fakeResponder } from "../../daemon/e2e-kit.js";
 
 const stubs: DaemonHandle[] = [];
 
@@ -435,4 +435,39 @@ describe("amail pair / unpair", () => {
     expect(await runUnpair(addr, { env })).toBe(true);
     expect(await runUnpair(addr, { env })).toBe(false);
   });
+});
+
+describe("pair confirm（discovery-free）", () => {
+  it("双方 --confirm 不依赖 mDNS：会话记住对端地址，发现被清空仍完成配对", async () => {
+    const homeA = sandboxEnv();
+    const homeB = sandboxEnv();
+    const stubA = await startStub(homeA.home);
+    const stubB = await startStub(homeB.home);
+    stubs.push(stubA.handle, stubB.handle);
+    enableFakeDiscovery();
+    const dirsA = resolveDirs(homeA.env);
+    const addrA = userAddress(stubA.handle.dirs, stubA.handle.identity);
+    const addrB = userAddress(stubB.handle.dirs, stubB.handle.identity);
+
+    // A 发起（显式 host/port → 会话记住目标）；B 应答（显式 host/port → 会话记住对端）
+    const firstA = runPair(addrB, { host: "127.0.0.1", port: stubB.handle.port, env: homeA.env });
+    const nonceB = await waitForPending(resolveDirs(homeB.env), addrA);
+    const firstB = await runPair(addrA, { host: "127.0.0.1", port: stubA.handle.port, env: homeB.env });
+    const statusA1 = await firstA;
+    expect(firstB.sas).toBe(statusA1.sas);
+
+    // 模拟 mDNS 完全不可用：清空发现注册表（/v1/peers/scan 将返回空）
+    fakeResponder.shutdown?.();
+    const scan = (await apiFetch(dirsA, "/v1/peers/scan")) as unknown[];
+    expect(scan).toHaveLength(0);
+
+    // 双方 --confirm 均不带 host/port：只能靠会话内记住的对端地址
+    const secondA = runPair(addrB, { confirm: true, env: homeA.env });
+    const secondB = runPair(addrA, { confirm: true, env: homeB.env });
+    const [sa, sb] = await Promise.all([secondA, secondB]);
+    expect(sa.stage).toBe("confirmed");
+    expect(sb.stage).toBe("confirmed");
+    const pa = (await apiFetch(dirsA, `/v1/pair/status/${nonceB}`)) as { stage: string };
+    expect(pa.stage).toBe("confirmed");
+  }, 15_000);
 });

@@ -24,6 +24,9 @@ interface PairSession {
   local: boolean;
   /** 发起方 CLI 声明的对端地址（offer 未 answer 时用于 pending 关联，重跑不新建 offer） */
   target?: string;
+  /** 对端 daemon 的已解析地址（offer/answer 时由 CLI 传入）——confirm 复用，不再依赖 mDNS */
+  remoteHost?: string;
+  remotePort?: number;
   confirmSigs: Map<string, PairConfirmSig>;
   peer: PeerRecord | null;
   createdAt: number;
@@ -278,13 +281,16 @@ const routes: Route[] = [
     lan: false,
     handler(ctx) {
       const offer = buildOffer(ctx);
-      const to = ctx.body && typeof ctx.body === "object" && "to" in ctx.body ? ctx.body.to : undefined;
+      const body = ctx.body && typeof ctx.body === "object" ? (ctx.body as { to?: unknown; host?: unknown; port?: unknown }) : undefined;
+      const to = body?.to;
       sessions(ctx.db).set(offer.nonce, {
         offerNonce: offer.nonce,
         offer,
         answer: null,
         local: true,
         target: typeof to === "string" && to ? to : undefined,
+        remoteHost: typeof body?.host === "string" ? body.host : undefined,
+        remotePort: typeof body?.port === "number" ? body.port : undefined,
         confirmSigs: new Map(),
         peer: null,
         createdAt: Date.now(),
@@ -316,6 +322,8 @@ const routes: Route[] = [
             deviceId: peer?.deviceId ?? null,
             local: s.local,
             stage: stageOf(s),
+            remoteHost: s.remoteHost ?? null,
+            remotePort: s.remotePort ?? null,
           };
         })
         .filter((item) => item.user !== null);
@@ -332,6 +340,11 @@ const routes: Route[] = [
       if (!session || session.local) {
         sendJson(ctx.res, 404, { error: "unknown-offer", offerNonce: ctx.params.offerNonce });
         return;
+      }
+      const ab = ctx.body && typeof ctx.body === "object" ? (ctx.body as { host?: unknown; port?: unknown }) : undefined;
+      if (typeof ab?.host === "string" && typeof ab?.port === "number") {
+        session.remoteHost = ab.host;
+        session.remotePort = ab.port;
       }
       if (session.answer) {
         sendJson(ctx.res, 200, { answer: session.answer, sas: sasOf(session) });

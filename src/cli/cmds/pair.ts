@@ -17,6 +17,8 @@ export interface PairOptions {
 }
 
 interface PendingOffer {
+  remoteHost?: string | null;
+  remotePort?: number | null;
   offerNonce: string;
   /** 对端地址；本机发起且未 answer 时由 CLI 声明的目标地址回填 */
   user: string;
@@ -122,22 +124,32 @@ export async function runPair(address: string, options: PairOptions = {}): Promi
   // 4. 本机发起但尚未 answer → 提示等待对端（保留原会话，不新建 offer）
   const pending = (await apiFetch(dirs, "/v1/pair/pending")) as PendingOffer[];
   const localSession = pending.find((p) => p.local && p.user === address);
-  const toConfirm = options.confirm && localSession?.stage === "answered" ? localSession : undefined;
-  const toAnswer = pending.find((p) => !p.local && p.user === address);
+  // 已显示 SAS 的会话（发起方或应答方皆可），confirm 与普通重跑都复用它
+  const answeredSession = pending.find((p) => p.user === address && p.stage === "answered");
+  const toConfirm = options.confirm ? answeredSession : undefined;
+  // 仅"未应答的远端 offer"进入应答模式；已应答的不得再次应答
+  const toAnswer = pending.find((p) => !p.local && p.user === address && p.stage !== "answered");
+  const storedTarget = (sess?: PendingOffer): PairTarget | undefined =>
+    sess?.remoteHost && sess?.remotePort ? { host: sess.remoteHost, port: sess.remotePort } : undefined;
 
   let offerNonce: string;
   if (toConfirm) {
     offerNonce = toConfirm.offerNonce;
-  } else if (!options.confirm && localSession?.stage === "answered") {
+    // confirm 复用会话内已解析的对端地址，不再触发 mDNS 发现
+    target = storedTarget(toConfirm) ?? target;
+  } else if (!options.confirm && answeredSession) {
     const status = (await apiFetch(
       dirs,
-      `/v1/pair/status/${encodeURIComponent(localSession.offerNonce)}`,
+      `/v1/pair/status/${encodeURIComponent(answeredSession.offerNonce)}`,
     )) as PairStatus;
-    console.log(`SAS: ${status.sas}（与对端比对，一致后 amail pair --confirm）`);
+    console.log(`SAS: ${status.sas}（与对端比对，一致后 amail pair ${address} --confirm）`);
     return status;
   } else if (toAnswer) {
+    const remote = await targetFor();
     const result = (await apiFetch(dirs, `/v1/pair/local-answer/${encodeURIComponent(toAnswer.offerNonce)}`, {
       method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ host: remote.host, port: remote.port }),
     })) as { answer: PairAnswer; sas: string };
     offerNonce = toAnswer.offerNonce;
     const res = await remoteJson(await targetFor(), `/v1/pair/answer/${encodeURIComponent(offerNonce)}`, {
@@ -172,7 +184,7 @@ export async function runPair(address: string, options: PairOptions = {}): Promi
     const { offer } = (await apiFetch(dirs, "/v1/pair/local-offer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ to: address }),
+      body: JSON.stringify({ to: address, host: remote.host, port: remote.port }),
     })) as {
       offer: PairOffer;
     };
