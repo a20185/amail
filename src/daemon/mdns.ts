@@ -1,4 +1,5 @@
 import { createSocket } from "node:dgram";
+import { networkInterfaces } from "node:os";
 import { DAEMON_VERSION, userAddress } from "./server.js";
 import { loadOrCreateIdentity } from "../core/identity.js";
 import type { Dirs } from "../core/paths.js";
@@ -399,6 +400,22 @@ export function parseResponse(buf: Buffer): Array<{ name: string; srv?: SrvRecor
   return [...out.values()];
 }
 
+/** 挑选 browse 使用的非内网 IPv4 接口地址（多网卡/VPN 主机逐接口 join+发送；排除回环） */
+export function pickBrowseInterfaces(
+  ifaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): string[] {
+  const out: string[] = [];
+  for (const infos of Object.values(ifaces)) {
+    for (const info of infos ?? []) {
+      if (info.internal) continue;
+      const fam = info.family as string | number;
+      if (fam !== "IPv4" && fam !== 4) continue;
+      out.push(info.address);
+    }
+  }
+  return [...new Set(out)];
+}
+
 async function browseWithDgram(timeoutMs: number): Promise<PeerAdvertisement[]> {
   const socket = createSocket({ type: "udp4", reuseAddr: true });
   const found = new Map<string, PeerAdvertisement>();
@@ -424,9 +441,32 @@ async function browseWithDgram(timeoutMs: number): Promise<PeerAdvertisement[]> 
   const { promise: bound, resolve: onBound } = Promise.withResolvers<void>();
   socket.bind(() => onBound());
   await bound;
-  socket.send(buildQuery(1, [`${AMAIL_SERVICE}.local`]), MDNS_PORT, MDNS_GROUP, () => {
-    // 发送失败也等待超时窗口
-  });
+
+  // 多网卡/VPN 主机：逐接口 join 组播组并按接口发送查询（默认路由可能落在 VPN/tunnel 上）
+  const query = buildQuery(1, [`${AMAIL_SERVICE}.local`]);
+  const ifaces = pickBrowseInterfaces();
+  for (const addr of ifaces) {
+    try {
+      socket.addMembership(MDNS_GROUP, addr);
+    } catch {
+      // 接口不支持组播时跳过
+    }
+  }
+  for (const addr of ifaces) {
+    try {
+      socket.setMulticastInterface(addr);
+      socket.send(query, MDNS_PORT, MDNS_GROUP, () => {
+        // 发送失败也等待超时窗口
+      });
+    } catch {
+      // 单接口失败不影响其他接口
+    }
+  }
+  if (ifaces.length === 0) {
+    socket.send(query, MDNS_PORT, MDNS_GROUP, () => {
+      // 无可用接口时退回默认路由，失败也等待超时窗口
+    });
+  }
 
   setTimeout(() => {
     socket.close();

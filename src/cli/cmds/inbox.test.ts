@@ -64,7 +64,7 @@ describe("showInbox", () => {
 
   it("fails with a clear error when the daemon is down", async () => {
     const { home, env } = sandboxEnv();
-    writeConfig(home, 36969);
+    writeConfig(home, 1); // 显式用关闭端口：避免本机真 daemon 干扰
     await expect(showInbox({ env })).rejects.toThrow(/daemon unreachable/);
   });
 });

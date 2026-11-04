@@ -15,6 +15,7 @@ import {
   type CiaoResponderLike,
   type MdnsResponder,
   type PeerAdvertisement,
+  pickBrowseInterfaces,
 } from "./mdns.js";
 
 function dnsName(name: string): Buffer {
@@ -224,5 +225,23 @@ describe("mDNS browsePeers（fake 注入）", () => {
       },
     });
     expect(result).toEqual(peers);
+  });
+});
+
+describe("pickBrowseInterfaces（多网卡/VPN）", () => {
+  it("只取非内网 IPv4 并去重；排除回环与 IPv6", () => {
+    const fake = {
+      lo0: [
+        { address: "127.0.0.1", family: "IPv4", internal: true },
+        { address: "::1", family: "IPv6", internal: true },
+      ],
+      en0: [
+        { address: "192.168.110.4", family: "IPv4", internal: false },
+        { address: "fe80::1", family: "IPv6", internal: false },
+      ],
+      utun1024: [{ address: "198.18.0.1", family: "IPv4", internal: false }],
+      en0dup: [{ address: "192.168.110.4", family: "IPv4", internal: false }],
+    } as unknown as Parameters<typeof pickBrowseInterfaces>[0];
+    expect(pickBrowseInterfaces(fake).sort()).toEqual(["192.168.110.4", "198.18.0.1"]);
   });
 });

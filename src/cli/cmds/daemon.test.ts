@@ -48,7 +48,7 @@ describe("daemonStatus / daemonStop", () => {
 
   it("status: not running when no daemon", async () => {
     const { home, env } = sandboxEnv();
-    writeConfig(home, 36969);
+    writeConfig(home, 1); // 显式用关闭端口：避免本机真 daemon 干扰（36969 可能被开发机占用）
     const status = await daemonStatus(env);
     expect(status.running).toBe(false);
     expect(status.alive).toBe(false);
