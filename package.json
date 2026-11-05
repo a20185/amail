@@ -27,5 +27,22 @@
     "@types/node": "^24.0.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
-  }
+  },
+  "description": "Peer-to-peer LAN mailbox and shared workspace for humans and AI agents",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/a20185/amail.git"
+  },
+  "homepage": "https://github.com/a20185/amail",
+  "bugs": {
+    "url": "https://github.com/a20185/amail/issues"
+  },
+  "keywords": [
+    "agent",
+    "mailbox",
+    "p2p",
+    "lan",
+    "mcp",
+    "ai-agents"
+  ]
 }
